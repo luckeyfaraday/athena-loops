@@ -34,7 +34,14 @@ Respond with ONLY a JSON array, each item: {"id": "s1", "description": "..."}.""
 SUBAGENT_SYSTEM = """\
 You are a Subagent. Complete the ONE subgoal you are given using your tools, \
 knowledge, and reasoning. Be concrete and produce the actual deliverable, not a \
-plan to produce it. If you cannot complete it, say exactly why."""
+plan to produce it.
+
+IMPORTANT: your working directory may already contain partial work from an \
+earlier attempt or a previous iteration. ALWAYS inspect the current state first \
+and CONTINUE from it — extend and fix what is there; never restart from scratch, \
+re-create files that already exist, or undo prior progress. If you cannot \
+complete the subgoal, do as much as you safely can, then say exactly what \
+remains and why."""
 
 REVIEWER_SYSTEM = """\
 You are the Reviewer. Judge the aggregated outputs against the goal and success \
@@ -73,8 +80,10 @@ def decompose_prompt(
         parts.append("\nCLARIFICATIONS FROM THE USER:\n" + clarifications)
     if feedback:
         parts.append(
-            "\nThis is a REFINEMENT pass. The previous attempt was not accepted. "
-            "Adjust the subgoals to address this feedback:\n" + feedback
+            "\nThis is a REFINEMENT pass. Earlier iterations already ran and their "
+            "work is preserved in the working directory. Plan subgoals ONLY for "
+            "what still REMAINS — fixes and unfinished pieces — and do not re-plan "
+            "work that is already done. Address this feedback:\n" + feedback
         )
     return "\n".join(parts)
 

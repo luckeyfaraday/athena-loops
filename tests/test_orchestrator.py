@@ -59,6 +59,24 @@ def test_agent_call_budget_guard():
     assert "max_agent_calls" in result.stop_reason
 
 
+def test_checkpoint_called_once_per_iteration():
+    seen = []
+    orch = Orchestrator(MockAgent(accept_on_iteration=2),
+                        checkpoint=lambda st: seen.append(st.iteration),
+                        budget=Budget(max_iterations=5))
+    result = orch.run("goal", "criteria")
+    assert result.completed
+    assert seen == [1, 2]  # one checkpoint per completed iteration
+
+
+def test_checkpoint_error_does_not_break_the_run():
+    def boom(_state):
+        raise RuntimeError("commit failed")
+    orch = Orchestrator(MockAgent(accept_on_iteration=1), checkpoint=boom,
+                        budget=Budget(max_iterations=2))
+    assert orch.run("goal", "criteria").completed  # survives a checkpoint failure
+
+
 def test_extract_json_recovers_from_prose_and_fences():
     assert extract_json('here you go: {"a": 1} thanks') == {"a": 1}
     assert extract_json('```json\n[1, 2, 3]\n```') == [1, 2, 3]

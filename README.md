@@ -108,8 +108,17 @@ with worktree("/path/to/repo") as wt:               # new branch + checkout
 
 Cleanup mirrors the harness's own worktrees: `cleanup="auto"` (default) **keeps**
 the worktree iff the run changed something (so you can inspect/merge the branch)
-and removes it if it left nothing; `"always"` / `"never"` force the choice. The
-example runner isolates automatically when given a repo:
+and removes it if it left nothing; `"always"` / `"never"` force the choice.
+
+**Partial work is never lost.** When you orchestrate against a repo, the loop
+**commits the worktree after every iteration** (`agentloop: iteration N`). So if
+a later iteration fails or a budget guard stops the run, each completed
+iteration's work is preserved as a checkpoint commit on the branch — recoverable,
+not discarded. The result's `worktree.checkpoints` lists them. Workers are also
+told to **inspect the working directory and continue** from prior work rather
+than restart, so a retry builds on what's already there instead of clobbering it.
+
+The example runner isolates automatically when given a repo:
 
 ```bash
 python3 -m examples.run_with_cli_agent claude /path/to/repo
