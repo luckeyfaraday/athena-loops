@@ -14,10 +14,81 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 from typing import Callable, Optional, Sequence
 
 from ..agent import Agent, AgentRequest, AgentResponse
+
+
+def _deshim_windows(shim_path: str) -> Optional[list[str]]:
+    """Turn an npm-style Windows ``.cmd``/``.bat`` shim into a direct argv.
+
+    npm installs CLIs as a batch shim (``claude.cmd``) whose last line execs the
+    real program — either a ``.exe`` directly (``claude``, ``opencode``) or
+    ``node "<cli.js>"`` (``codex``). Running the ``.cmd`` means **cmd.exe** parses
+    the command line, and cmd TRUNCATES any argument at an embedded newline — so a
+    multi-line worker prompt silently loses everything after its first line. By
+    resolving the shim to the underlying ``.exe`` (or ``node`` + script) we spawn
+    it directly: no cmd.exe, so multi-line/special-char arguments pass through
+    intact. Returns the fixed leading argv (target, plus script for node shims),
+    or ``None`` when the file isn't a recognizable shim (caller then falls back to
+    running the ``.cmd`` as-is — correct for single-line args, no worse than before).
+    """
+    try:
+        with open(shim_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    dp0 = os.path.dirname(os.path.abspath(shim_path))
+
+    def expand(token: str) -> str:
+        token = token.replace("%~dp0", dp0).replace("%dp0%", dp0)
+        return os.path.normpath(token)
+
+    # The exec line is the one passing through all caller args (`%*`).
+    exec_line = next((ln for ln in reversed(text.splitlines()) if "%*" in ln), None)
+    if not exec_line:
+        return None
+    tokens = [expand(t) for t in re.findall(r'"([^"]*)"', exec_line)]
+    exe = next((t for t in tokens if t.lower().endswith(".exe") and os.path.isfile(t)), None)
+    if exe:
+        return [exe]
+    script = next((t for t in tokens if t.lower().endswith(".js") and os.path.isfile(t)), None)
+    if script:
+        node = os.path.join(dp0, "node.exe")
+        node = node if os.path.isfile(node) else shutil.which("node")
+        if node:
+            return [node, script]
+    return None
+
+
+def _resolve_program(argv: list[str]) -> list[str]:
+    """Resolve ``argv[0]`` to a concrete executable path before spawning.
+
+    Coding-agent CLIs installed via npm (``claude``, ``codex``, ``opencode``)
+    are shim files on Windows — ``claude.cmd`` / ``claude.ps1`` — not a bare
+    ``claude.exe``. ``subprocess`` runs with ``shell=False`` (the prompt carries
+    arbitrary characters, so a shell is unsafe), and in that mode Windows does
+    not apply ``PATHEXT``: spawning bare ``"claude"`` raises ``FileNotFoundError``,
+    which the loop reports as "CLI isn't available". ``shutil.which`` honors
+    ``PATHEXT`` and returns e.g. ``...\\claude.cmd``. We then de-shim that batch
+    wrapper to the real ``.exe`` so cmd.exe never sees (and truncates at newlines)
+    a multi-line prompt argument. On POSIX this just returns the resolved absolute
+    path, or leaves argv unchanged when the program isn't found so the original
+    error still surfaces.
+    """
+    if not argv:
+        return argv
+    resolved = shutil.which(argv[0])
+    if not resolved:
+        return argv
+    if os.name == "nt" and resolved.lower().endswith((".cmd", ".bat")):
+        fixed = _deshim_windows(resolved)
+        if fixed:
+            return [*fixed, *argv[1:]]
+    return [resolved, *argv[1:]]
 
 # Placeholders substituted into the command template (per-arg, plain string replace
 # so JSON braces in prompts are never touched):
@@ -65,7 +136,7 @@ class CliAgent(Agent):
             f"{request.system}\n\n{request.prompt}" if request.system else request.prompt
         )
         subs = {"{prompt}": request.prompt, "{system}": request.system, "{combined}": combined}
-        argv = [self._sub(arg, subs) for arg in self.command]
+        argv = _resolve_program([self._sub(arg, subs) for arg in self.command])
 
         env = {**os.environ, **self.extra_env} if self.extra_env else None
         run_kw: dict[str, object] = {
