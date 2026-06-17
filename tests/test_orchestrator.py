@@ -56,6 +56,35 @@ def test_emit_streams_fine_grained_events():
     assert "deliverable produced" in finished["output"]
 
 
+class _RecordingAgent(MockAgent):
+    """A MockAgent that remembers the system prompt seen for each role."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.systems: dict[str, str] = {}
+
+    def run(self, request: AgentRequest) -> "object":
+        self.systems[request.role] = request.system
+        return super().run(request)
+
+
+def test_playwright_off_keeps_prompts_clean():
+    agent = _RecordingAgent(accept_on_iteration=1)
+    Orchestrator(agent, budget=Budget(max_iterations=1)).run("goal", "criteria")
+    assert "Playwright" not in agent.systems["subagent"]
+    assert "Playwright" not in agent.systems["reviewer"]
+
+
+def test_playwright_on_injects_prompt_guidance():
+    agent = _RecordingAgent(accept_on_iteration=1)
+    Orchestrator(
+        agent, budget=Budget(max_iterations=1), playwright=True
+    ).run("goal", "criteria")
+    # Both the worker and the reviewer get the Playwright guidance.
+    assert "Playwright" in agent.systems["subagent"]
+    assert "Playwright" in agent.systems["reviewer"]
+
+
 def test_emit_errors_never_break_the_run():
     def boom(*_args):
         raise RuntimeError("event sink is down")

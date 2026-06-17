@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 from .agent import Agent, AgentRequest
-from .roles import SUBAGENT_SYSTEM, subagent_prompt
+from .roles import subagent_prompt, subagent_system
 from .types import (
     EVENT_SUBAGENT_FAILED,
     EVENT_SUBAGENT_FINISHED,
@@ -33,6 +33,7 @@ def _run_one(
     max_retries: int,
     on_call: Callable[[], None],
     on_event: Optional[OnEvent] = None,
+    playwright: bool = False,
 ) -> TaskResult:
     emit = on_event or (lambda _kind, _data: None)
     last_error = ""
@@ -45,7 +46,7 @@ def _run_one(
             resp = agent.run(
                 AgentRequest(
                     role="subagent",
-                    system=SUBAGENT_SYSTEM,
+                    system=subagent_system(playwright),
                     prompt=subagent_prompt(subgoal, goal),
                     context={"subgoal_id": subgoal.id},
                 )
@@ -80,14 +81,18 @@ def execute(
     on_call: Callable[[], None],
     parallel: bool = True,
     on_event: Optional[OnEvent] = None,
+    playwright: bool = False,
 ) -> list[TaskResult]:
     """Run all subgoals, preserving input order in the returned results."""
     if not parallel or len(subgoals) <= 1:
-        return [_run_one(agent, sg, goal, max_retries, on_call, on_event) for sg in subgoals]
+        return [
+            _run_one(agent, sg, goal, max_retries, on_call, on_event, playwright)
+            for sg in subgoals
+        ]
 
     with ThreadPoolExecutor(max_workers=min(len(subgoals), 8)) as pool:
         futures = [
-            pool.submit(_run_one, agent, sg, goal, max_retries, on_call, on_event)
+            pool.submit(_run_one, agent, sg, goal, max_retries, on_call, on_event, playwright)
             for sg in subgoals
         ]
         return [f.result() for f in futures]

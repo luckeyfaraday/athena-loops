@@ -46,6 +46,10 @@ _CLI_PRESETS = {
 BACKENDS = ["mock", "claude_api", *_CLI_PRESETS]
 RECOMMENDED_MCP_TIMEOUT_MS = 600_000
 
+# The verify command auto-added when a run sets playwright=true. Kept timeout-free
+# by default (browser launch is slow); pass verify_timeout only if you must.
+PLAYWRIGHT_VERIFY_COMMAND = "npx playwright test"
+
 
 def _run_version(command: list[str], *, timeout: float = 5) -> dict[str, Any]:
     try:
@@ -252,17 +256,24 @@ def _run_loop_impl(
     verify_commands: Optional[list[str]], verify_timeout: Optional[float],
     observer: Optional[Callable[[LoopState], None]],
     emit: Optional[Callable[[str, int, dict], None]] = None,
+    playwright: bool = False,
 ) -> dict[str, Any]:
     """Run the loop (intake already done) and return a JSON-serializable result."""
     budget = Budget(max_iterations=max_iterations, max_task_retries=max_task_retries,
                     max_seconds=max_seconds)
+    # `playwright` is one switch for both halves of browser-level testing: it adds
+    # the Playwright suite as a verify gate AND turns on the matching prompt
+    # guidance in the orchestrator (subagent writes tests, reviewer requires them).
+    commands = list(verify_commands or [])
+    if playwright and PLAYWRIGHT_VERIFY_COMMAND not in commands:
+        commands.append(PLAYWRIGHT_VERIFY_COMMAND)
 
     def run_in(workdir: Optional[str], wt: Optional[Worktree]) -> dict[str, Any]:
         agent = _build_agent(backend, workdir, skip_permissions, model, timeout)
         verifier = None
-        if verify_commands:
+        if commands:
             verifier = CommandVerifier(
-                [parse_verify_command(cmd, timeout=verify_timeout) for cmd in verify_commands],
+                [parse_verify_command(cmd, timeout=verify_timeout) for cmd in commands],
                 cwd=workdir,
             )
         # In a worktree, commit after each iteration so partial work is durable
@@ -273,7 +284,7 @@ def _run_loop_impl(
                 f"agentloop: iteration {st.iteration}")
         orch = Orchestrator(
             agent, budget=budget, observer=observer, checkpoint=checkpoint,
-            verifier=verifier, emit=emit,
+            verifier=verifier, emit=emit, playwright=playwright,
         )
         return _result_dict(orch.run_loop(goal, criteria, clarifications), wt)
 
@@ -300,6 +311,7 @@ def orchestrate_impl(
     max_seconds: Optional[float] = None,
     verify_commands: Optional[list[str]] = None,
     verify_timeout: Optional[float] = None,
+    playwright: bool = False,
     interaction: Optional[Interaction] = None,
     observer: Optional[Callable[[LoopState], None]] = None,
 ) -> dict[str, Any]:
@@ -336,7 +348,7 @@ def orchestrate_impl(
             max_iterations=max_iterations, max_task_retries=max_task_retries,
             skip_permissions=skip_permissions, isolate=isolate, model=model,
             timeout=timeout, max_seconds=max_seconds, verify_commands=verify_commands,
-            verify_timeout=verify_timeout, observer=observer,
+            verify_timeout=verify_timeout, playwright=playwright, observer=observer,
         )
     except Exception as exc:  # noqa: BLE001 - preserve MCP response shape on backend failure
         return _error_result(exc, stage="loop")
@@ -369,6 +381,7 @@ def _loop_kwargs(kw: dict[str, Any]) -> dict[str, Any]:
         timeout=kw.get("timeout"), max_seconds=kw.get("max_seconds"),
         verify_commands=kw.get("verify_commands"),
         verify_timeout=kw.get("verify_timeout"),
+        playwright=kw.get("playwright", False),
     )
 
 
@@ -578,6 +591,7 @@ def orchestrate_resume_impl(
         timeout=data.get("timeout"), max_seconds=data.get("max_seconds"),
         verify_commands=data.get("verify_commands"),
         verify_timeout=data.get("verify_timeout"),
+        playwright=data.get("playwright", False),
     )
 
 
@@ -664,6 +678,7 @@ def build_server():
         max_seconds: Optional[float] = None,
         verify_commands: Optional[list[str]] = None,
         verify_timeout: Optional[float] = None,
+        playwright: bool = False,
         detach: bool = True,
     ) -> dict[str, Any]:
         """Run an orchestrator -> worker -> reviewer loop until the success
@@ -716,6 +731,11 @@ def build_server():
             verify_commands: Optional real commands to run after each worker
                 iteration, e.g. ["python3 -m pytest", "npx playwright test"].
             verify_timeout: Optional seconds cap for each verification command.
+            playwright: When true, encourage browser-level testing for web/UI
+                work in one switch: adds "npx playwright test" as a verify gate
+                AND tells subagents to write/extend Playwright tests and the
+                reviewer to require passing ones before completing. Leave
+                verify_timeout unset — browser launch is slow.
             detach: Default true — start in the background and return a run_id to
                 monitor (the recommended flow above). Set false only to hold one
                 MCP request open and get the final result dict directly; that mode
@@ -735,13 +755,14 @@ def build_server():
                 max_iterations=max_iterations, skip_permissions=skip_permissions,
                 isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
                 verify_commands=verify_commands, verify_timeout=verify_timeout,
+                playwright=playwright,
             )
         return await _run_with_progress(_ctx(), lambda observer: orchestrate_suspendable(
             goal, success_criteria, backend=backend, cwd=cwd,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
             verify_commands=verify_commands, verify_timeout=verify_timeout,
-            observer=observer,
+            playwright=playwright, observer=observer,
         ), start_message="starting blocking orchestration (detach=false); monitor "
            "via detach=true next time if the host request times out")
 

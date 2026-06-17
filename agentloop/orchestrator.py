@@ -17,13 +17,13 @@ from .roles import (
     CLARIFIER_SYSTEM,
     CRITERIA_SYSTEM,
     DECOMPOSER_SYSTEM,
-    REVIEWER_SYSTEM,
     aggregate,
     build_feedback,
     clarify_prompt,
     criteria_prompt,
     decompose_prompt,
     review_prompt,
+    reviewer_system,
 )
 from .scheduler import execute
 from .types import (
@@ -74,6 +74,7 @@ class Orchestrator:
         max_clarifying_questions: int = 4,
         verifier: Optional[CommandVerifier] = None,
         emit: Optional[Emitter] = None,
+        playwright: bool = False,
     ):
         self.agent = agent
         self.budget = budget or Budget()
@@ -88,6 +89,9 @@ class Orchestrator:
         self.interaction = interaction or AutoInteraction()
         self.max_clarifying_questions = max_clarifying_questions
         self.verifier = verifier
+        # Append Playwright testing guidance to the subagent/reviewer prompts so
+        # web/UI work is exercised end-to-end (paired with a Playwright verify gate).
+        self.playwright = playwright
         self._lock = threading.Lock()
 
     def _emit(self, kind: str, iteration: int, data: dict) -> None:
@@ -195,6 +199,7 @@ class Orchestrator:
                 on_call=count_call,
                 parallel=self.parallel,
                 on_event=emit,
+                playwright=self.playwright,
             )
 
             # 4. Aggregate finished task outputs.
@@ -299,7 +304,7 @@ class Orchestrator:
         resp = self.agent.run(
             AgentRequest(
                 role="reviewer",
-                system=REVIEWER_SYSTEM,
+                system=reviewer_system(self.playwright),
                 prompt=review_prompt(
                     state.goal, state.success_criteria, aggregated, verification
                 ),

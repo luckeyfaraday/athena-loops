@@ -41,7 +41,13 @@ earlier attempt or a previous iteration. ALWAYS inspect the current state first 
 and CONTINUE from it — extend and fix what is there; never restart from scratch, \
 re-create files that already exist, or undo prior progress. If you cannot \
 complete the subgoal, do as much as you safely can, then say exactly what \
-remains and why.
+remains and why."""
+
+# Opt-in Playwright guidance, appended to the subagent/reviewer system prompts
+# only when a run enables it (CLI --playwright / orchestrate playwright=true).
+# Kept out of the base prompts so non-web runs stay free of irrelevant testing
+# instructions; see subagent_system / reviewer_system below.
+PLAYWRIGHT_SUBAGENT_NOTE = """
 
 TESTING: if your subgoal touches a web UI or browser-observable behavior, write \
 or extend Playwright tests that exercise the change end-to-end, and run them \
@@ -64,11 +70,22 @@ Respond with ONLY a JSON object:
   "issues": ["..."],            // concrete, actionable; empty if none
   "follow_up_questions": ["..."] // info needed from the user; empty if none
 }
-Be strict: goal_complete is true only if every success criterion is met. For \
-work that touches a web UI or browser-observable behavior, do NOT mark \
-goal_complete unless there is evidence of passing Playwright tests that exercise \
-the change; if such tests are missing or failing, set goal_complete to false and \
-add a concrete issue asking for them."""
+Be strict: goal_complete is true only if every success criterion is met."""
+
+PLAYWRIGHT_REVIEWER_NOTE = """ For work that touches a web UI or \
+browser-observable behavior, do NOT mark goal_complete unless there is evidence \
+of passing Playwright tests that exercise the change; if such tests are missing \
+or failing, set goal_complete to false and add a concrete issue asking for them."""
+
+
+def subagent_system(playwright: bool = False) -> str:
+    """The subagent system prompt, with optional Playwright testing guidance."""
+    return SUBAGENT_SYSTEM + (PLAYWRIGHT_SUBAGENT_NOTE if playwright else "")
+
+
+def reviewer_system(playwright: bool = False) -> str:
+    """The reviewer system prompt, with optional Playwright evidence gate."""
+    return REVIEWER_SYSTEM + (PLAYWRIGHT_REVIEWER_NOTE if playwright else "")
 
 
 def criteria_prompt(goal: str) -> str:
