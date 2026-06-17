@@ -44,8 +44,7 @@ def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
         kw: dict[str, Any] = {"timeout": timeout}
         if cwd:
             kw["cwd"] = cwd
-        if backend != "opencode":  # opencode's run has no skip-permissions flag
-            kw["skip_permissions"] = skip_permissions
+        kw["skip_permissions"] = skip_permissions
         if backend == "claude_code" and model:
             kw["model"] = model
         return _CLI_PRESETS[backend](**kw)

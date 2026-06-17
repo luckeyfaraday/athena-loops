@@ -39,8 +39,7 @@ def run_against(agent_name: str, cwd: str | None) -> None:
     kw = {}
     if cwd:
         kw["cwd"] = cwd
-        if agent_name != "opencode":  # opencode's run has no skip-permissions flag
-            kw["skip_permissions"] = True
+        kw["skip_permissions"] = True
     orch = Orchestrator(build(**kw), budget=Budget(max_iterations=3))
     result = orch.run(goal=GOAL, success_criteria=CRITERIA)
     print(f"\ncompleted={result.completed} iterations={result.iterations} "

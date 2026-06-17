@@ -27,6 +27,16 @@ from ..agent import Agent, AgentRequest, AgentResponse
 _PROMPT_KEYS = ("{prompt}", "{combined}")
 
 
+def _parse_claude_json(out: str) -> str:
+    data = json.loads(out)
+    if data.get("is_error"):
+        status = data.get("api_error_status")
+        result = str(data.get("result") or "").strip()
+        detail = f"status {status}: {result}" if status else result
+        raise RuntimeError(f"Claude Code reported an error: {detail}")
+    return data["result"]
+
+
 class CliAgent(Agent):
     def __init__(
         self,
@@ -114,7 +124,7 @@ class CliAgent(Agent):
         if skip_permissions:
             cmd.append("--dangerously-skip-permissions")
         # `--output-format json` wraps the reply in an envelope; pull out `.result`.
-        return cls(cmd, parse_output=lambda out: json.loads(out)["result"], **kw)
+        return cls(cmd, parse_output=_parse_claude_json, **kw)
 
     @classmethod
     def codex(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
@@ -125,8 +135,12 @@ class CliAgent(Agent):
         return cls(cmd, **kw)
 
     @classmethod
-    def opencode(cls, **kw) -> "CliAgent":
-        return cls(["opencode", "run", "{combined}"], **kw)
+    def opencode(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
+        cmd = ["opencode", "run"]
+        if skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+        cmd.append("{combined}")
+        return cls(cmd, **kw)
 
     @classmethod
     def aider(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
