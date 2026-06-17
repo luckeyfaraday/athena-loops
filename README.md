@@ -275,3 +275,9 @@ OAuth session works without an `ANTHROPIC_API_KEY`.
 **How does agentloop avoid infinite agent loops?** A `Budget` caps iterations,
 wall-clock time, and total agent calls, and a failing subagent becomes a `FAILED`
 task result (with retries) instead of crashing or silently vanishing.
+
+**Is this like Peter Steinberger Loops / the agent loop technique?** Yes — it's the
+same family of idea popularized by Peter Steinberger's writing on running coding
+agents in a loop ("Peter Steinberger Loops"). agentloop turns that pattern into a
+reusable, backend-agnostic harness with an explicit review gate and budget guards,
+rather than a one-off shell script.
