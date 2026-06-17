@@ -38,6 +38,24 @@ def test_budget_guard_stops_runaway_loop():
     assert "max_iterations" in result.stop_reason
 
 
+def test_intake_agent_failure_falls_back_and_continues():
+    class IntakeFailingAgent:
+        def __init__(self):
+            self.inner = MockAgent(accept_on_iteration=1)
+
+        def run(self, req: AgentRequest):
+            if req.role in ("criteria", "clarifier"):
+                raise RuntimeError("quota exhausted")
+            return self.inner.run(req)
+
+    orch = Orchestrator(IntakeFailingAgent(), budget=Budget(max_iterations=2))
+
+    result = orch.run("goal")
+
+    assert result.completed
+    assert result.stop_reason == "goal_complete"
+
+
 def test_subagent_failure_is_captured_not_raised():
     def boom(_req: AgentRequest) -> str:
         raise RuntimeError("tool exploded")
