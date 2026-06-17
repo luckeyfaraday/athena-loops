@@ -116,8 +116,10 @@ class LoopResult:
 # tail-able events.jsonl) and the calling agent (via the orchestrate_tail tool)
 # can watch the loop work in real time. The orchestrator emits the iteration
 # events; the scheduler emits the subagent ones; the detached launcher emits the
-# run-level bookends.
+# run-level bookends and the pre-loop intake events.
 EVENT_RUN_STARTED = "run_started"
+EVENT_INTAKE_STARTED = "intake_started"
+EVENT_INTAKE_FINISHED = "intake_finished"
 EVENT_ITERATION_STARTED = "iteration_started"
 EVENT_DECOMPOSED = "decomposed"
 EVENT_SUBAGENT_STARTED = "subagent_started"
@@ -129,6 +131,9 @@ EVENT_REVIEW = "review"
 EVENT_ITERATION_FINISHED = "iteration_finished"
 EVENT_RUN_FINISHED = "run_finished"
 EVENT_RUN_ERROR = "run_error"
+# Intake paused for clarification; the run stops with questions + a resume token
+# in its result instead of blocking the start call to ask.
+EVENT_NEEDS_INPUT = "needs_input"
 
 
 @dataclass

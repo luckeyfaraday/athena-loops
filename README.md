@@ -153,9 +153,11 @@ python3 -m agentloop.mcp_server        # stdio transport
 ```
 
 Tools:
-- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout, detach)`
-  — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`.
-  With `detach=true` it returns `{ status: "running", run_id, … }` immediately (see below).
+- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout, detach=true)`
+  — runs the loop. **Detached by default:** returns `{ status: "running", run_id, … }`
+  immediately and runs to completion in the background — you monitor it (see below).
+  Pass `detach=false` to instead block and get the result (or `{ status:
+  "needs_input", questions[], token }`) back in a single call.
 - `orchestrate_resume(token, answers, detach)` — continues a run that asked for input
 - `orchestrate_status(run_id)` — light status of a detached run (phase, iteration, running)
 - `orchestrate_tail(run_id, cursor, limit)` — the events a detached run produced since `cursor`
@@ -174,17 +176,24 @@ pass, goal incomplete`), so the caller sees live status instead of a bare
 spinner.
 When `cwd` is given it runs in an isolated worktree (see above) by default.
 
-**Live visibility — don't go blind until it's done.** A blocking `orchestrate`
-call hides everything until the whole loop returns. Pass `detach=true` to run it
-on a background thread and get a `run_id` back immediately:
+**Fire and monitor — the default.** `orchestrate` runs detached: it returns a
+`run_id` immediately and the loop runs to completion (or error) in the background.
+There is **no run timeout** — you watch it rather than race it against a clock:
 
 ```
-orchestrate(goal=…, backend="claude_code", cwd="/repo", detach=true)
+orchestrate(goal=…, backend="claude_code", cwd="/repo")   # detach=true by default
   -> { status: "running", run_id, run_dir, events_path, tail_command }
-orchestrate_tail(run_id, cursor)      -> { events[], cursor, running, more }
-orchestrate_status(run_id)            -> { phase, iteration, running, … }
-orchestrate_result(run_id, wait=true) -> the final result, once done
+orchestrate_status(run_id)        -> { phase, iteration, running, … }   # poll until running=false
+orchestrate_tail(run_id, cursor)  -> { events[], cursor, running, more } # or stream each step
+orchestrate_result(run_id)        -> the final result, once running=false
 ```
+
+Poll `orchestrate_status` (it returns instantly) until `running` is false, then
+read `orchestrate_result`. Avoid `orchestrate_result(wait=true)` with no timeout —
+that re-opens a request for the whole run, the very thing detached mode avoids.
+Intake runs in the background too, so even a slow or clarifying intake never
+blocks the start call; if it pauses, the result's `stop_reason` is `needs_input`
+(with `questions` + `token`) — answer it with `orchestrate_resume`.
 
 The calling agent starts the run, then **interleaves polling `orchestrate_tail`
 with talking to you** — so you both see the loop work in real time: each subgoal
@@ -205,17 +214,18 @@ terminal**, independent of the agent:
 
 Worker output previews ride inline in the event stream; each worker's *full*
 output is written to `workers/iter<N>_<subgoal>.out` and referenced by
-`data.output_path`. Detached runs also sidestep the MCP request-timeout problem
-entirely: the tool returns at once, so there's no long-blocking call to time out.
+`data.output_path`. Because the default flow returns at once, it sidesteps the
+MCP request-timeout problem entirely — there's no long-blocking call to time out.
 
-Timeouts have three different layers. The MCP host/client has its own request
-timeout; if it reports `-32001 Request timed out`, that often means the host
-stopped waiting before `orchestrate` returned, not that a backend failed to
-spawn. Configure long-running MCP hosts to wait at least `600000` ms. Separately,
-`orchestrate(timeout=...)` is a hard cap for each CLI worker subprocess, while
-`max_seconds` is a cooperative loop budget checked between phases/iterations and
-does not interrupt one blocked subprocess. Have agents call `doctor()` before
-guessing about missing CLIs or broken backend spawning.
+Timeouts, briefly. The default detached flow has **no run timeout** and never
+holds an MCP request open, so the host's `-32001 Request timed out` cannot occur
+on it. That error applies only to the opt-in blocking mode (`detach=false`), where
+one request spans the whole run; if you use that mode, configure the host to wait
+generously (≥ `600000` ms). `orchestrate(timeout=…)` (per worker subprocess) and
+`max_seconds` (cooperative loop budget) remain *optional* hard kills — both
+default off; leave them unset for real coding runs and monitor to completion
+instead. Have agents call `doctor()` before guessing about missing CLIs or broken
+backend spawning.
 
 **Plug into Claude Code.** Point `PYTHONPATH` at the repo so the server resolves
 the package no matter where Claude Code launches it (no install needed):

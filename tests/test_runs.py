@@ -107,6 +107,21 @@ def test_unknown_run_id_is_reported():
     assert "error" in orchestrate_result_impl("does-not-exist")
 
 
+def test_detached_start_returns_immediately_and_runs_intake_in_background(tmp_path):
+    """The start call returns a run_id at once; intake then runs on the run's own
+    thread (so a blocking/slow intake can never time out or freeze the caller)."""
+    started = _start(tmp_path, max_iterations=2)
+    assert started["status"] == "running"
+
+    orchestrate_result_impl(started["run_id"], wait=True, timeout=15)
+    kinds = [e["kind"] for e in orchestrate_tail_impl(started["run_id"], cursor=0)["events"]]
+    # run_started is emitted before intake even begins, so status is observable
+    # immediately; intake bookends come from the background thread.
+    assert "intake_started" in kinds and "intake_finished" in kinds
+    assert kinds.index("run_started") < kinds.index("intake_started")
+    assert kinds.index("intake_finished") < kinds.index("decomposed")
+
+
 def test_detached_resume_runs_in_background(tmp_path, monkeypatch):
     from agentloop.adapters import MockAgent
 
@@ -116,12 +131,24 @@ def test_detached_resume_runs_in_background(tmp_path, monkeypatch):
         lambda *a, **k: MockAgent(questions=["Which scope?"], accept_on_iteration=1),
     )
 
+    # Detached start returns immediately; the clarification pause surfaces through
+    # the run's result, not by blocking the start call.
     started = orchestrate_start_impl("goal", "", backend="mock",
                                      max_iterations=2, base_dir=str(tmp_path))
-    assert started["status"] == "needs_input"
+    assert started["status"] == "running"
+
+    paused = orchestrate_result_impl(started["run_id"], wait=True, timeout=15)
+    assert paused["status"] == "needs_input"
+    assert paused["stop_reason"] == "needs_input"
+    assert paused["questions"] == ["Which scope?"]
+    assert paused["completed"] is False
+
+    # A human tailing the run sees the pause as an event too.
+    kinds = [e["kind"] for e in orchestrate_tail_impl(started["run_id"], cursor=0)["events"]]
+    assert "needs_input" in kinds
 
     resumed = orchestrate_resume_impl(
-        started["token"], ["all of it"], detach=True, base_dir=str(tmp_path))
+        paused["token"], ["all of it"], detach=True, base_dir=str(tmp_path))
     assert resumed["status"] == "running"
 
     result = orchestrate_result_impl(resumed["run_id"], wait=True, timeout=15)

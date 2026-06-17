@@ -24,8 +24,15 @@ from typing import Any, Callable, Optional
 from .adapters import CliAgent, MockAgent
 from .interaction import AutoInteraction, Interaction, NeedInput, SuspendInteraction
 from .orchestrator import Orchestrator
-from .runs import MANAGER, run_base
-from .types import Budget, LoopResult, LoopState
+from .runs import MANAGER, RunHandle, run_base
+from .types import (
+    EVENT_INTAKE_FINISHED,
+    EVENT_INTAKE_STARTED,
+    EVENT_NEEDS_INPUT,
+    Budget,
+    LoopResult,
+    LoopState,
+)
 from .verifier import CommandVerifier, parse_verify_command
 from .worktree import Worktree, worktree
 
@@ -101,10 +108,18 @@ def doctor_impl(cwd: Optional[str] = None) -> dict[str, Any]:
 
     backends = {name: _backend_status(name) for name in BACKENDS}
     recommendations = [
-        "If an MCP client reports -32001 Request timed out, first check the host/client MCP request timeout; it does not prove the worker backend failed to spawn.",
-        f"For long orchestrate runs, configure the host MCP request timeout to at least {RECOMMENDED_MCP_TIMEOUT_MS} ms.",
-        "Set orchestrate(timeout=...) for a hard cap on each CLI worker call; timeout=None means no per-call cap.",
-        "max_seconds is a loop budget checked between phases/iterations; it is not a hard kill for one stuck CLI subprocess.",
+        "orchestrate is detached by default: it returns a run_id immediately and "
+        "runs until it finishes or errors. Monitor with orchestrate_status / "
+        "orchestrate_tail / orchestrate_result — do not impose a run timeout.",
+        "There is no wall-clock cap on a run. Prefer monitoring to completion over "
+        "capping; timeout/max_seconds are optional hard kills (default off), not "
+        "part of the normal flow — leave them unset for real coding runs.",
+        "MCP error -32001 Request timed out only affects the opt-in blocking mode "
+        "(detach=false), where one request spans the whole run. The default "
+        "detached flow returns at once and cannot hit it; switch to it.",
+        f"If you deliberately use detach=false, raise the host MCP request timeout "
+        f"to at least {RECOMMENDED_MCP_TIMEOUT_MS} ms; detached poll calls return "
+        "fast and need no such bump.",
         "Use skip_permissions=true for trusted, isolated headless coding runs that need tool access.",
     ]
     if cwd and not cwd_status["exists"]:
@@ -121,9 +136,16 @@ def doctor_impl(cwd: Optional[str] = None) -> dict[str, Any]:
         "backends": backends,
         "timeouts": {
             "recommended_mcp_request_timeout_ms": RECOMMENDED_MCP_TIMEOUT_MS,
-            "mcp_request_timeout": "Configured in the host agent (Claude/OpenCode/Codex/etc.); this server cannot see or override it.",
-            "worker_timeout": "orchestrate(timeout=seconds) caps each individual CLI worker subprocess; None disables this cap.",
-            "max_seconds": "orchestrate(max_seconds=seconds) is a cooperative loop budget checked between phases/iterations, not during one blocking subprocess.run call.",
+            "model": "orchestrate is detached by default and returns immediately; "
+                     "monitor the run_id to completion. There is no run timeout.",
+            "blocking_mode": "Only orchestrate(detach=false) holds one MCP request "
+                             "open for the whole run; that mode alone is bound by "
+                             "the host MCP request timeout (which this server cannot "
+                             "see or override).",
+            "worker_timeout": "orchestrate(timeout=seconds) optionally caps each CLI "
+                              "worker subprocess; None (default) = no cap.",
+            "max_seconds": "orchestrate(max_seconds=seconds) is an optional cooperative "
+                           "loop budget checked between phases; None (default) = no cap.",
         },
         "recommendations": recommendations,
     }
@@ -320,7 +342,44 @@ def orchestrate_impl(
         return _error_result(exc, stage="loop")
 
 
-# --- detached runs (live visibility: start, then status/tail/result) ---------
+# --- detached runs (the default: start instantly, then monitor to completion) -
+#
+# A detached run owns its own thread for EVERYTHING it does — intake included.
+# Nothing here may run a worker on the caller's thread: the MCP `orchestrate`
+# tool is async, so a blocking subprocess on that thread would freeze the whole
+# server (missed pings -> the host drops the connection, not just one request).
+# So `orchestrate_start_impl` returns a run_id in milliseconds and the loop,
+# including any slow or clarifying intake, happens in the background where it is
+# observed through status/tail/result — never by holding the start call open.
+
+def _short(text: str, limit: int = 200) -> str:
+    """A compact, event-friendly excerpt of goal/criteria text."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _loop_kwargs(kw: dict[str, Any]) -> dict[str, Any]:
+    """Extract the run_loop knobs from a raw orchestrate kwarg bag (with defaults)."""
+    return dict(
+        backend=kw.get("backend", "claude_code"), cwd=kw.get("cwd"),
+        max_iterations=kw.get("max_iterations", 4),
+        max_task_retries=kw.get("max_task_retries", 1),
+        skip_permissions=kw.get("skip_permissions", False),
+        isolate=kw.get("isolate", True), model=kw.get("model"),
+        timeout=kw.get("timeout"), max_seconds=kw.get("max_seconds"),
+        verify_commands=kw.get("verify_commands"),
+        verify_timeout=kw.get("verify_timeout"),
+    )
+
+
+def _meta(goal: str, criteria: str, kw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "goal": goal, "success_criteria": criteria,
+        "backend": kw.get("backend", "claude_code"), "cwd": kw.get("cwd"),
+        "max_iterations": kw.get("max_iterations", 4),
+        "isolate": kw.get("isolate", True),
+    }
+
 
 def _intake(goal: str, success_criteria: str, kw: dict[str, Any],
             interaction: Interaction) -> tuple[str, str, str]:
@@ -336,35 +395,24 @@ def _intake(goal: str, success_criteria: str, kw: dict[str, Any],
     return orch.intake(goal, success_criteria)
 
 
-def _launch(goal: str, criteria: str, clarifications: str, *,
-            kw: dict[str, Any], base_dir: Optional[str]) -> dict[str, Any]:
-    """Start the loop on a background thread and return its run_id immediately."""
-    cwd = kw.get("cwd")
-    base = base_dir or run_base(cwd)
-    meta = {
-        "goal": goal, "success_criteria": criteria,
-        "backend": kw.get("backend", "claude_code"), "cwd": cwd,
-        "max_iterations": kw.get("max_iterations", 4),
-        "isolate": kw.get("isolate", True),
+def _needs_input_result(questions: list[str], token: str) -> dict[str, Any]:
+    """A terminal run result meaning intake paused for clarification.
+
+    Detached runs never block the start call to ask; the pause surfaces here, via
+    orchestrate_status / orchestrate_result, and is resumed with
+    orchestrate_resume(token, answers, detach=true).
+    """
+    out: dict[str, Any] = {
+        "completed": False, "iterations": 0, "stop_reason": "needs_input",
+        "status": "needs_input", "questions": list(questions), "token": token,
+        "final_output": "", "history": [],
     }
+    out["summary"] = "needs input: " + " | ".join(questions)
+    return out
 
-    def thunk(emit: Callable[[str, int, dict], None]) -> dict[str, Any]:
-        try:
-            return _run_loop_impl(
-                goal, criteria, clarifications, emit=emit, observer=None,
-                backend=kw.get("backend", "claude_code"), cwd=cwd,
-                max_iterations=kw.get("max_iterations", 4),
-                max_task_retries=kw.get("max_task_retries", 1),
-                skip_permissions=kw.get("skip_permissions", False),
-                isolate=kw.get("isolate", True), model=kw.get("model"),
-                timeout=kw.get("timeout"), max_seconds=kw.get("max_seconds"),
-                verify_commands=kw.get("verify_commands"),
-                verify_timeout=kw.get("verify_timeout"),
-            )
-        except Exception as exc:  # noqa: BLE001 — record as a failed result, not a torn thread
-            return _error_result(exc, stage="loop")
 
-    handle = MANAGER.start(thunk=thunk, meta=meta, base=base)
+def _running_envelope(handle: RunHandle) -> dict[str, Any]:
+    """What a detached start returns: the run_id plus how to monitor it."""
     events_path = os.path.join(handle.run_dir, "events.jsonl")
     return {
         "status": "running",
@@ -373,44 +421,80 @@ def _launch(goal: str, criteria: str, clarifications: str, *,
         "events_path": events_path,
         "tail_command": f"tail -f {events_path}",
         "message": (
-            "Orchestration started in the background. Poll orchestrate_status(run_id) "
-            "and orchestrate_tail(run_id, cursor) to watch it live, or "
-            "orchestrate_result(run_id, wait=true) for the final result. A human can "
-            f"`tail -f` the events file directly."
+            "Orchestration started in the background and runs until it finishes or "
+            "errors — there is no run timeout. Monitor it: poll "
+            "orchestrate_status(run_id) until running is false, then "
+            "orchestrate_result(run_id) for the outcome (or orchestrate_tail("
+            "run_id, cursor) to watch each step live). A human can `tail -f` the "
+            "events file. If the result's stop_reason is 'needs_input', read its "
+            "questions + token and call orchestrate_resume(token, answers)."
         ),
     }
+
+
+def _launch(goal: str, criteria: str, clarifications: str, *,
+            kw: dict[str, Any], base_dir: Optional[str]) -> dict[str, Any]:
+    """Start an already-intaken loop on a background thread; return its run_id."""
+    def thunk(emit: Callable[[str, int, dict], None]) -> dict[str, Any]:
+        try:
+            return _run_loop_impl(goal, criteria, clarifications, emit=emit,
+                                  observer=None, **_loop_kwargs(kw))
+        except Exception as exc:  # noqa: BLE001 — a failed result, not a torn thread
+            return _error_result(exc, stage="loop")
+
+    handle = MANAGER.start(thunk=thunk, meta=_meta(goal, criteria, kw),
+                           base=base_dir or run_base(kw.get("cwd")))
+    return _running_envelope(handle)
 
 
 def orchestrate_start_impl(
     goal: str, success_criteria: str = "", *,
     base_dir: Optional[str] = None, answers: Optional[list[str]] = None, **kw: Any,
 ) -> dict[str, Any]:
-    """Detached `orchestrate`: do intake synchronously, then run in the background.
+    """Detached `orchestrate`: return a run_id immediately; intake + loop run in
+    the background. Never blocks the caller to clarify, and never runs a worker on
+    the calling thread (which, for the async MCP tool, would freeze the server).
 
-    Returns immediately with either { status: "needs_input", questions, token }
-    (intake needs answers — resume with orchestrate_resume(detach=true)) or
-    { status: "running", run_id, run_dir, events_path } once the loop is launched.
-    Unknown backends and other input errors raise loudly before anything starts.
+    Returns { status: "running", run_id, run_dir, events_path } right away. Watch
+    it with orchestrate_status / orchestrate_tail; fetch the outcome with
+    orchestrate_result(run_id). If intake needs answers, the run finishes with
+    stop_reason "needs_input" (questions + a resume token in its result) — resume
+    with orchestrate_resume(token, answers, detach=true). Unknown backends raise
+    loudly here, before anything starts.
     """
     backend = kw.get("backend", "claude_code")
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
-    try:
-        goal, criteria, clarifications = _intake(
-            goal, success_criteria, kw, SuspendInteraction(answers))
-    except NeedInput as ni:
-        return {
-            "status": "needs_input",
-            "questions": ni.questions,
-            "token": _encode_token({
-                "goal": ni.goal or goal,
-                "criteria": ni.criteria or success_criteria,
+
+    def thunk(emit: Callable[[str, int, dict], None]) -> dict[str, Any]:
+        # Intake runs HERE, on the run's own thread, so the start call returns
+        # instantly and a slow or clarifying intake can never time out the caller.
+        emit(EVENT_INTAKE_STARTED, 0, {"goal": _short(goal)})
+        try:
+            g, criteria, clarifications = _intake(
+                goal, success_criteria, kw, SuspendInteraction(answers))
+        except NeedInput as ni:
+            token = _encode_token({
+                "goal": ni.goal or goal, "criteria": ni.criteria or success_criteria,
                 "questions": ni.questions, **kw,
-            }),
-        }
-    except Exception as exc:  # noqa: BLE001 - preserve response shape on backend failure
-        return _error_result(exc, stage="intake")
-    return _launch(goal, criteria, clarifications, kw=kw, base_dir=base_dir)
+            })
+            emit(EVENT_NEEDS_INPUT, 0, {"questions": ni.questions})
+            return _needs_input_result(ni.questions, token)
+        except Exception as exc:  # noqa: BLE001 — a failed result, not a torn thread
+            return _error_result(exc, stage="intake")
+        emit(EVENT_INTAKE_FINISHED, 0, {
+            "success_criteria": _short(criteria),
+            "has_clarifications": bool(clarifications),
+        })
+        try:
+            return _run_loop_impl(g, criteria, clarifications, emit=emit,
+                                  observer=None, **_loop_kwargs(kw))
+        except Exception as exc:  # noqa: BLE001
+            return _error_result(exc, stage="loop")
+
+    handle = MANAGER.start(thunk=thunk, meta=_meta(goal, success_criteria, kw),
+                           base=base_dir or run_base(kw.get("cwd")))
+    return _running_envelope(handle)
 
 
 def orchestrate_status_impl(run_id: str) -> dict[str, Any]:
@@ -580,24 +664,34 @@ def build_server():
         max_seconds: Optional[float] = None,
         verify_commands: Optional[list[str]] = None,
         verify_timeout: Optional[float] = None,
-        detach: bool = False,
+        detach: bool = True,
     ) -> dict[str, Any]:
         """Run an orchestrator -> worker -> reviewer loop until the success
-        criteria are met (or a budget guard trips), and return the result.
+        criteria are met (or a budget guard trips).
 
-        Important timeout contract for MCP callers: this is a long-running,
-        synchronous tool. If your host reports MCP error -32001 "Request timed
-        out", first check the host/client MCP request timeout. That error often
-        means the host stopped waiting before this tool returned; it does not by
-        itself prove the worker backend failed to spawn. Run doctor() to check
-        CLI/backend availability before making that diagnosis.
+        How to drive this (the default, detach=true): this call returns
+        IMMEDIATELY with { status: "running", run_id }. The loop — intake, then
+        decompose -> fan out to `backend` workers -> aggregate -> review -> repeat
+        — keeps running in the background until it finishes or errors. There is NO
+        run timeout. You watch it to completion:
 
-        The loop first does INTAKE: if it needs to clarify the task, it returns
-        { status: "needs_input", questions: [...], token } WITHOUT running — call
-        `orchestrate_resume(token, answers)` with the user's answers to continue.
-        If no clarification is needed it runs straight through. It then decomposes
-        the goal into subgoals, fans them out to `backend` workers, aggregates,
-        reviews (quality/consistency/goal-alignment), and loops until complete.
+            1. poll orchestrate_status(run_id) until "running" is false
+               (or stream steps live with orchestrate_tail(run_id, cursor));
+            2. then call orchestrate_result(run_id) for the outcome.
+
+        Do not set a wall-clock cap to "be safe" — coding runs are legitimately
+        long and unpredictable; monitor them, don't guillotine them. `timeout` and
+        `max_seconds` exist only as optional hard kills and default to off.
+
+        Because the start call returns at once, MCP error -32001 "Request timed
+        out" does not happen on the default path. It can only happen if you opt
+        into the blocking mode (detach=false), where one MCP request is held open
+        for the entire run; that mode alone is bound by the host MCP request
+        timeout. Prefer the default and monitor.
+
+        Intake may pause to clarify the task. When it does, the run finishes with
+        stop_reason "needs_input" and its result carries { questions[], token };
+        gather answers and call orchestrate_resume(token, answers) to continue.
 
         Args:
             goal: What to achieve.
@@ -613,35 +707,27 @@ def build_server():
             isolate: When `cwd` is set, run in a throwaway git worktree/branch so
                 the caller's checkout is untouched (recommended).
             model: Optional model override for claude_code / claude_api.
-            timeout: Seconds to cap EACH worker CLI subprocess call. None
-                (default) = no hard per-call cap. Set this when you need stuck
-                worker calls to fail cleanly instead of relying on MCP request
-                timeouts.
-            max_seconds: Wall-clock cap on the WHOLE run, checked between
-                phases/iterations. This is cooperative and does not interrupt a
-                single blocking worker subprocess call.
+            timeout: OPTIONAL seconds to cap EACH worker CLI subprocess call. None
+                (default) = no per-call cap. Leave unset for normal runs; set it
+                only to force a genuinely stuck worker to fail instead of hanging.
+            max_seconds: OPTIONAL wall-clock cap on the whole run, checked between
+                phases. None (default) = no cap. Leave unset; the run is monitored
+                to completion, not raced against a clock.
             verify_commands: Optional real commands to run after each worker
                 iteration, e.g. ["python3 -m pytest", "npx playwright test"].
             verify_timeout: Optional seconds cap for each verification command.
-            detach: Run in the background instead of blocking. Returns a run_id
-                immediately; watch it live with orchestrate_status / orchestrate_tail
-                and fetch the result with orchestrate_result(run_id, wait=true). Use
-                this to avoid being blind until the whole loop finishes and to dodge
-                MCP request timeouts entirely on long coding runs.
-
-        Streams a `notifications/progress` update when starting and per iteration
-        as it runs, so the calling agent can show live status instead of a bare
-        spinner. Some hosts still enforce a separate MCP request timeout even
-        when progress notifications are emitted; configure that host timeout to
-        a large value (recommended: 600000 ms or more) for real coding runs — or
-        pass detach=true and poll.
+            detach: Default true — start in the background and return a run_id to
+                monitor (the recommended flow above). Set false only to hold one
+                MCP request open and get the final result dict directly; that mode
+                streams per-iteration progress notifications but is subject to the
+                host MCP request timeout, so it suits short/mock runs.
 
         Returns:
-            With detach=true: { status: "running", run_id, run_dir, events_path }
-            (or { status: "needs_input", questions[], token } if intake asks).
-            Otherwise: { status: "needs_input", questions[], token } or
-            { completed, iterations, stop_reason, final_output, summary,
-              history[], worktree?{ path, branch, changed_files } }
+            detach=true (default): { status: "running", run_id, run_dir,
+              events_path, message } — monitor with status/tail/result.
+            detach=false: { status: "needs_input", questions[], token } or
+              { completed, iterations, stop_reason, final_output, summary,
+                history[], worktree?{ path, branch, changed_files } }.
         """
         if detach:
             return orchestrate_start_impl(
@@ -656,33 +742,32 @@ def build_server():
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
             verify_commands=verify_commands, verify_timeout=verify_timeout,
             observer=observer,
-        ), start_message=(
-            "starting orchestration: if this later fails with MCP -32001, check the "
-            "host MCP request timeout before blaming worker backend spawning"
-        ))
+        ), start_message="starting blocking orchestration (detach=false); monitor "
+           "via detach=true next time if the host request times out")
 
     @mcp.tool()
     async def orchestrate_resume(
-        token: str, answers: list[str], detach: bool = False
+        token: str, answers: list[str], detach: bool = True
     ) -> dict[str, Any]:
-        """Resume a run that returned `needs_input`.
+        """Resume a run whose intake paused with stop_reason "needs_input".
 
         Args:
-            token: The opaque token from the `needs_input` response.
+            token: The opaque token from the needs_input result.
             answers: One answer per question, in the order they were asked.
-            detach: Run the resumed loop in the background and return a run_id
-                (watch with orchestrate_status / orchestrate_tail), instead of
-                blocking until it finishes.
+            detach: Default true — run the resumed loop in the background and
+                return a run_id to monitor (poll orchestrate_status until done,
+                then orchestrate_result), with no run timeout. Set false to hold
+                the MCP request open for the whole run and get the result dict
+                directly (subject to the host request timeout).
 
-        Returns: with detach=true, { status: "running", run_id, ... }; otherwise
-        the same result shape as a completed `orchestrate` call (and streams
-        per-iteration progress the same way).
+        Returns: detach=true -> { status: "running", run_id, ... } to monitor;
+        detach=false -> the same result shape as a completed `orchestrate` call.
         """
         if detach:
             return orchestrate_resume_impl(token, answers, detach=True)
         return await _run_with_progress(
             _ctx(), lambda observer: orchestrate_resume_impl(token, answers, observer=observer),
-            start_message="resuming orchestration from answers",
+            start_message="resuming blocking orchestration from answers",
         )
 
     @mcp.tool()
@@ -717,13 +802,22 @@ def build_server():
     ) -> dict[str, Any]:
         """Fetch the final result of a detached run.
 
+        Preferred monitoring: poll orchestrate_status(run_id) (returns instantly)
+        until running is false, THEN call this with wait=false. Using wait=true
+        with timeout=None (or a large timeout) holds this MCP request open for the
+        rest of the run — which is exactly the blocking behavior detached mode
+        avoids, and can hit the host request timeout. If you do wait, use a short
+        timeout and call again; a still-running run returns { status: "running" }.
+
         Args:
             run_id: The id returned by orchestrate(detach=true).
             wait: If true, block up to `timeout` seconds for the run to finish.
-            timeout: Seconds to wait when wait=true (None = until it finishes).
+            timeout: Seconds to wait when wait=true (None = until it finishes —
+                avoid; this re-blocks the request for the whole run).
 
-        Returns the same result shape as a blocking `orchestrate` call once done,
-        or a { status: "running", ... } dict if it is still going.
+        Returns the same result shape as a blocking `orchestrate` call once done
+        (including stop_reason "needs_input" with questions + token if intake
+        paused), or a { status: "running", ... } dict if it is still going.
         """
         return orchestrate_result_impl(run_id, wait, timeout)
 
@@ -742,9 +836,12 @@ def build_server():
                      "OAuth); claude_api needs ANTHROPIC_API_KEY; mock is for tests. "
                      "Run doctor() before guessing about backend availability.",
             "timeouts": {
-                "recommended_mcp_request_timeout_ms": RECOMMENDED_MCP_TIMEOUT_MS,
-                "worker_timeout": "orchestrate(timeout=seconds) caps each CLI worker call",
-                "max_seconds": "cooperative loop budget, not a hard subprocess kill",
+                "model": "orchestrate is detached by default; it returns a run_id "
+                         "at once and is monitored to completion with no run timeout.",
+                "worker_timeout": "orchestrate(timeout=seconds) optionally caps each "
+                                  "CLI worker call (default off)",
+                "max_seconds": "optional cooperative loop budget (default off), not a "
+                               "hard subprocess kill",
             },
         }
 
