@@ -108,6 +108,25 @@ def _result_dict(result: LoopResult, wt: Optional[Worktree]) -> dict[str, Any]:
     return out
 
 
+def _error_result(exc: Exception, *, stage: str) -> dict[str, Any]:
+    """Return a normal tool result for backend/runtime failures.
+
+    MCP callers need actionable JSON back instead of a torn-down request when a
+    worker CLI is unavailable, rate-limited, misconfigured, or times out.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    out: dict[str, Any] = {
+        "completed": False,
+        "iterations": 0,
+        "stop_reason": f"{stage}_agent_error",
+        "final_output": detail,
+        "history": [],
+        "error": detail,
+    }
+    out["summary"] = _summary(out)
+    return out
+
+
 def _run_loop_impl(
     goal: str, criteria: str, clarifications: str, *,
     backend: str, cwd: Optional[str], max_iterations: int, max_task_retries: int,
@@ -177,20 +196,32 @@ def orchestrate_impl(
     when it needs answers (see `orchestrate_suspendable`).
     """
     interaction = interaction or AutoInteraction()
-    # Intake needs an agent but not a worktree (it only asks/plans, never edits).
-    intake_orch = Orchestrator(
-        _build_agent(backend, cwd, skip_permissions, model, timeout),
-        budget=Budget(max_iterations=max_iterations),
-        interaction=interaction,
-    )
-    goal, criteria, clarifications = intake_orch.intake(goal, success_criteria)
-    return _run_loop_impl(
-        goal, criteria, clarifications, backend=backend, cwd=cwd,
-        max_iterations=max_iterations, max_task_retries=max_task_retries,
-        skip_permissions=skip_permissions, isolate=isolate, model=model,
-        timeout=timeout, max_seconds=max_seconds, verify_commands=verify_commands,
-        verify_timeout=verify_timeout, observer=observer,
-    )
+    # Build once up front so programmer/input errors like an unknown backend still
+    # fail loudly, while runtime CLI/API failures below are returned as JSON.
+    intake_agent = _build_agent(backend, cwd, skip_permissions, model, timeout)
+    try:
+        # Intake needs an agent but not a worktree (it only asks/plans, never edits).
+        intake_orch = Orchestrator(
+            intake_agent,
+            budget=Budget(max_iterations=max_iterations),
+            interaction=interaction,
+        )
+        goal, criteria, clarifications = intake_orch.intake(goal, success_criteria)
+    except NeedInput:
+        raise
+    except Exception as exc:  # noqa: BLE001 - preserve MCP response shape on backend failure
+        return _error_result(exc, stage="intake")
+
+    try:
+        return _run_loop_impl(
+            goal, criteria, clarifications, backend=backend, cwd=cwd,
+            max_iterations=max_iterations, max_task_retries=max_task_retries,
+            skip_permissions=skip_permissions, isolate=isolate, model=model,
+            timeout=timeout, max_seconds=max_seconds, verify_commands=verify_commands,
+            verify_timeout=verify_timeout, observer=observer,
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve MCP response shape on backend failure
+        return _error_result(exc, stage="loop")
 
 
 # --- suspend / resume (for stateless surfaces: MCP, scripted CLI) ------------
