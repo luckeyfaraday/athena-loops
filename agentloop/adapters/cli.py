@@ -83,10 +83,14 @@ class CliAgent(Agent):
         try:
             proc = subprocess.run(argv, **run_kw)
         except subprocess.TimeoutExpired as exc:
-            partial = (exc.stdout or "")
-            if isinstance(partial, bytes):
-                partial = partial.decode(errors="replace")
-            hint = f" (partial output: {partial.strip()[:200]!r})" if partial.strip() else ""
+            partial_stdout = self._text(exc.stdout)
+            partial_stderr = self._text(exc.stderr)
+            parts = []
+            if partial_stdout.strip():
+                parts.append(f"stdout: {self._snippet(partial_stdout)}")
+            if partial_stderr.strip():
+                parts.append(f"stderr: {self._snippet(partial_stderr)}")
+            hint = f" (partial output: {'; '.join(parts)})" if parts else ""
             raise RuntimeError(
                 f"CLI agent timed out after {self.timeout}s: {argv[0]}{hint}"
             ) from exc
@@ -104,6 +108,19 @@ class CliAgent(Agent):
         for key, val in subs.items():
             arg = arg.replace(key, val)
         return arg
+
+    @staticmethod
+    def _text(value: object) -> str:
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return str(value or "")
+
+    @staticmethod
+    def _snippet(value: str, limit: int = 1000) -> str:
+        text = value.strip()
+        if len(text) <= limit:
+            return repr(text)
+        return repr("..." + text[-limit:])
 
     # --- presets -----------------------------------------------------------
     # Starting templates for common coding agents. CLI flags change between
@@ -140,7 +157,7 @@ class CliAgent(Agent):
 
     @classmethod
     def opencode(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
-        cmd = ["opencode", "run"]
+        cmd = ["opencode", "run", "--print-logs"]
         if skip_permissions:
             cmd.append("--dangerously-skip-permissions")
         cmd.append("{combined}")

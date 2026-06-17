@@ -89,6 +89,23 @@ def test_timeout_raises():
         agent.run(_req())
 
 
+def test_timeout_error_includes_stdout_and_stderr():
+    script = (
+        "import sys, time; "
+        "print('partial out', flush=True); "
+        "print('partial err', file=sys.stderr, flush=True); "
+        "time.sleep(5)"
+    )
+    agent = CliAgent([sys.executable, "-u", "-c", script], timeout=0.3)
+
+    with pytest.raises(RuntimeError) as exc:
+        agent.run(_req())
+
+    msg = str(exc.value)
+    assert "partial out" in msg
+    assert "partial err" in msg
+
+
 def test_default_has_no_per_call_timeout():
     # Coding workers are slow; the default must not cap them at some short value.
     assert CliAgent([sys.executable, "-c", "pass"]).timeout is None
@@ -114,6 +131,7 @@ def test_skip_permissions_adds_bypass_flag():
     assert "--dangerously-skip-permissions" not in CliAgent.claude_code().command
     assert "--dangerously-bypass-approvals-and-sandbox" in CliAgent.codex(skip_permissions=True).command
     assert "--dangerously-skip-permissions" in CliAgent.opencode(skip_permissions=True).command
+    assert "--print-logs" in CliAgent.opencode().command
     assert "--dangerously-skip-permissions" not in CliAgent.opencode().command
     assert "--yes-always" in CliAgent.aider(skip_permissions=True).command
 
