@@ -146,7 +146,11 @@ Tools:
 - `list_backends()` — the worker engines this server can drive
 
 A completed result is structured:
-`{ completed, iterations, stop_reason, final_output, history[], worktree? }`.
+`{ completed, iterations, stop_reason, final_output, summary, history[], worktree? }`
+— `summary` is a one-line human-readable digest for the calling agent to show.
+While it runs, `orchestrate` streams a `notifications/progress` update per
+iteration (e.g. `iteration 2/4: 3/3 subgoals ok, gates pass, goal incomplete`),
+so the caller sees live status instead of a bare spinner.
 When `cwd` is given it runs in an isolated worktree (see above) by default.
 
 **Plug into Claude Code.** Point `PYTHONPATH` at the repo so the server resolves

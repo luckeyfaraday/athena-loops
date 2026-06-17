@@ -12,7 +12,12 @@ import tempfile
 
 import pytest
 
-from agentloop.mcp_server import BACKENDS, orchestrate_impl
+from agentloop.mcp_server import (
+    BACKENDS,
+    _run_with_progress,
+    orchestrate_impl,
+    orchestrate_suspendable,
+)
 
 
 def test_orchestrate_impl_mock_completes():
@@ -24,6 +29,51 @@ def test_orchestrate_impl_mock_completes():
     # The result must be JSON-serializable (it goes over the wire).
     import json
     json.dumps(out)
+
+
+def test_result_carries_readable_summary():
+    out = orchestrate_impl("g", "c", backend="mock", max_iterations=3)
+    assert "completed in" in out["summary"] and "goal_complete" in out["summary"]
+
+
+def test_run_with_progress_emits_per_iteration():
+    """The MCP runner relays one progress notification per loop iteration."""
+    import anyio
+
+    events: list[tuple] = []
+
+    class FakeCtx:
+        async def report_progress(self, progress, total, message):
+            events.append((progress, total, message))
+
+    async def go():
+        return await _run_with_progress(
+            FakeCtx(),
+            lambda observer: orchestrate_suspendable(
+                "g", "c", backend="mock", max_iterations=3, observer=observer
+            ),
+        )
+
+    out = anyio.run(go)
+    assert len(events) == out["iterations"] >= 1
+    # progress is 1-based iteration / total cap, with a human-readable message.
+    p0, total0, msg0 = events[0]
+    assert p0 == 1 and total0 == 3 and "iteration 1/3" in msg0
+
+
+def test_run_with_progress_tolerates_no_context():
+    """ctx=None (no live request) just runs the loop, no progress emitted."""
+    import anyio
+
+    out = anyio.run(
+        lambda: _run_with_progress(
+            None,
+            lambda observer: orchestrate_suspendable(
+                "g", "c", backend="mock", max_iterations=2, observer=observer
+            ),
+        )
+    )
+    assert out["completed"] is True
 
 
 def test_orchestrate_impl_reports_history_shape():
