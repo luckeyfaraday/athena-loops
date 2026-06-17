@@ -15,6 +15,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import shutil
+import subprocess
+import sys
 from typing import Any, Callable, Optional
 
 from .adapters import CliAgent, MockAgent
@@ -32,6 +36,96 @@ _CLI_PRESETS = {
     "aider": CliAgent.aider,
 }
 BACKENDS = ["mock", "claude_api", *_CLI_PRESETS]
+RECOMMENDED_MCP_TIMEOUT_MS = 600_000
+
+
+def _run_version(command: list[str], *, timeout: float = 5) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"timed out after {timeout}s"}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    output = (proc.stdout or proc.stderr or "").strip()
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "output": output[:500],
+    }
+
+
+def _backend_status(name: str) -> dict[str, Any]:
+    if name == "mock":
+        return {"available": True, "kind": "in_process", "notes": "deterministic test backend"}
+    if name == "claude_api":
+        return {
+            "available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "kind": "api",
+            "env": "ANTHROPIC_API_KEY",
+            "notes": "requires ANTHROPIC_API_KEY in the MCP server environment",
+        }
+
+    executable = {
+        "claude_code": "claude",
+        "codex": "codex",
+        "opencode": "opencode",
+        "aider": "aider",
+    }[name]
+    path = shutil.which(executable)
+    status: dict[str, Any] = {
+        "available": path is not None,
+        "kind": "cli",
+        "executable": executable,
+        "path": path,
+    }
+    if path:
+        status["version"] = _run_version([executable, "--version"])
+    else:
+        status["error"] = f"{executable!r} not found on PATH"
+    return status
+
+
+def doctor_impl(cwd: Optional[str] = None) -> dict[str, Any]:
+    """Return non-invasive diagnostics for MCP hosts and worker backends."""
+    cwd_status: dict[str, Any] = {"path": cwd, "provided": cwd is not None}
+    if cwd:
+        cwd_status.update({
+            "exists": os.path.isdir(cwd),
+            "readable": os.access(cwd, os.R_OK),
+            "writable": os.access(cwd, os.W_OK),
+        })
+
+    backends = {name: _backend_status(name) for name in BACKENDS}
+    recommendations = [
+        "If an MCP client reports -32001 Request timed out, first check the host/client MCP request timeout; it does not prove the worker backend failed to spawn.",
+        f"For long orchestrate runs, configure the host MCP request timeout to at least {RECOMMENDED_MCP_TIMEOUT_MS} ms.",
+        "Set orchestrate(timeout=...) for a hard cap on each CLI worker call; timeout=None means no per-call cap.",
+        "max_seconds is a loop budget checked between phases/iterations; it is not a hard kill for one stuck CLI subprocess.",
+        "Use skip_permissions=true for trusted, isolated headless coding runs that need tool access.",
+    ]
+    if cwd and not cwd_status["exists"]:
+        recommendations.insert(0, "The supplied cwd does not exist; worker CLIs cannot run there.")
+
+    return {
+        "ok": True,
+        "server": {
+            "python": sys.executable,
+            "package_dir": os.path.dirname(__file__),
+            "path": os.environ.get("PATH", ""),
+        },
+        "cwd": cwd_status,
+        "backends": backends,
+        "timeouts": {
+            "recommended_mcp_request_timeout_ms": RECOMMENDED_MCP_TIMEOUT_MS,
+            "mcp_request_timeout": "Configured in the host agent (Claude/OpenCode/Codex/etc.); this server cannot see or override it.",
+            "worker_timeout": "orchestrate(timeout=seconds) caps each individual CLI worker subprocess; None disables this cap.",
+            "max_seconds": "orchestrate(max_seconds=seconds) is a cooperative loop budget checked between phases/iterations, not during one blocking subprocess.run call.",
+        },
+        "recommendations": recommendations,
+    }
 
 
 def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
@@ -273,7 +367,12 @@ def _progress_observer(report: Callable[[int, int, str], None]) -> Callable[[Loo
     return observer
 
 
-async def _run_with_progress(ctx, thunk: Callable[[Optional[Callable]], dict[str, Any]]):
+async def _run_with_progress(
+    ctx,
+    thunk: Callable[[Optional[Callable]], dict[str, Any]],
+    *,
+    start_message: str = "starting long-running orchestration",
+):
     """Run a blocking `thunk(observer)` off the event loop, relaying each
     iteration to the MCP client via `ctx.report_progress`.
 
@@ -291,6 +390,8 @@ async def _run_with_progress(ctx, thunk: Callable[[Optional[Callable]], dict[str
             await ctx.report_progress(progress=progress, total=total, message=message)
         except Exception:
             pass  # progress is best-effort; never fail a run over a notification
+
+    await _emit(0, 1, start_message)
 
     def report(progress: int, total: int, message: str) -> None:
         anyio.from_thread.run(_emit, progress, total, message)
@@ -331,6 +432,13 @@ def build_server():
         """Run an orchestrator -> worker -> reviewer loop until the success
         criteria are met (or a budget guard trips), and return the result.
 
+        Important timeout contract for MCP callers: this is a long-running,
+        synchronous tool. If your host reports MCP error -32001 "Request timed
+        out", first check the host/client MCP request timeout. That error often
+        means the host stopped waiting before this tool returned; it does not by
+        itself prove the worker backend failed to spawn. Run doctor() to check
+        CLI/backend availability before making that diagnosis.
+
         The loop first does INTAKE: if it needs to clarify the task, it returns
         { status: "needs_input", questions: [...], token } WITHOUT running — call
         `orchestrate_resume(token, answers)` with the user's answers to continue.
@@ -352,16 +460,22 @@ def build_server():
             isolate: When `cwd` is set, run in a throwaway git worktree/branch so
                 the caller's checkout is untouched (recommended).
             model: Optional model override for claude_code / claude_api.
-            timeout: Seconds to cap EACH worker CLI call. None (default) = no
-                per-call cap. Real coding workers are slow; don't set this low.
+            timeout: Seconds to cap EACH worker CLI subprocess call. None
+                (default) = no hard per-call cap. Set this when you need stuck
+                worker calls to fail cleanly instead of relying on MCP request
+                timeouts.
             max_seconds: Wall-clock cap on the WHOLE run, checked between
-                iterations. Prefer this over `timeout` to bound a long build.
+                phases/iterations. This is cooperative and does not interrupt a
+                single blocking worker subprocess call.
             verify_commands: Optional real commands to run after each worker
                 iteration, e.g. ["python3 -m pytest", "npx playwright test"].
             verify_timeout: Optional seconds cap for each verification command.
 
-        Streams a `notifications/progress` update per iteration as it runs, so the
-        calling agent can show live status instead of a bare spinner.
+        Streams a `notifications/progress` update when starting and per iteration
+        as it runs, so the calling agent can show live status instead of a bare
+        spinner. Some hosts still enforce a separate MCP request timeout even
+        when progress notifications are emitted; configure that host timeout to
+        a large value (recommended: 600000 ms or more) for real coding runs.
 
         Returns:
             Either { status: "needs_input", questions[], token } or
@@ -374,6 +488,9 @@ def build_server():
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
             verify_commands=verify_commands, verify_timeout=verify_timeout,
             observer=observer,
+        ), start_message=(
+            "starting orchestration: if this later fails with MCP -32001, check the "
+            "host MCP request timeout before blaming worker backend spawning"
         ))
 
     @mcp.tool()
@@ -388,7 +505,8 @@ def build_server():
         streams per-iteration progress the same way).
         """
         return await _run_with_progress(
-            _ctx(), lambda observer: orchestrate_resume_impl(token, answers, observer=observer)
+            _ctx(), lambda observer: orchestrate_resume_impl(token, answers, observer=observer),
+            start_message="resuming orchestration from answers",
         )
 
     @mcp.tool()
@@ -398,8 +516,32 @@ def build_server():
             "backends": BACKENDS,
             "default": "claude_code",
             "notes": "CLI backends reuse that tool's own login (incl. subscription "
-                     "OAuth); claude_api needs ANTHROPIC_API_KEY; mock is for tests.",
+                     "OAuth); claude_api needs ANTHROPIC_API_KEY; mock is for tests. "
+                     "Run doctor() before guessing about backend availability.",
+            "timeouts": {
+                "recommended_mcp_request_timeout_ms": RECOMMENDED_MCP_TIMEOUT_MS,
+                "worker_timeout": "orchestrate(timeout=seconds) caps each CLI worker call",
+                "max_seconds": "cooperative loop budget, not a hard subprocess kill",
+            },
         }
+
+    @mcp.tool()
+    def doctor(cwd: Optional[str] = None) -> dict[str, Any]:
+        """Diagnose this MCP server and worker backend availability without running agents.
+
+        Use this before concluding that `orchestrate` cannot spawn backends. In
+        particular, MCP error -32001 usually means the host agent's MCP request
+        timeout expired while this long-running tool was still working; it does
+        not by itself prove Claude Code, Codex, opencode, or aider failed.
+
+        Args:
+            cwd: Optional target workspace to check for existence/read/write access.
+
+        Returns CLI presence/version checks, cwd access, and explicit timeout
+        guidance distinguishing host MCP request timeout, worker `timeout`, and
+        cooperative `max_seconds`.
+        """
+        return doctor_impl(cwd)
 
     return mcp
 

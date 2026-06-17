@@ -17,6 +17,7 @@ import pytest
 from agentloop.mcp_server import (
     BACKENDS,
     _run_with_progress,
+    doctor_impl,
     orchestrate_impl,
     orchestrate_suspendable,
 )
@@ -56,10 +57,13 @@ def test_run_with_progress_emits_per_iteration():
         )
 
     out = anyio.run(go)
-    assert len(events) == out["iterations"] >= 1
-    # progress is 1-based iteration / total cap, with a human-readable message.
+    assert len(events) == out["iterations"] + 1
+    # The first event is immediate, before the first blocking worker iteration.
     p0, total0, msg0 = events[0]
-    assert p0 == 1 and total0 == 3 and "iteration 1/3" in msg0
+    assert p0 == 0 and total0 == 1 and "starting" in msg0
+    # Iteration progress remains 1-based iteration / total cap.
+    p1, total1, msg1 = events[1]
+    assert p1 == 1 and total1 == 3 and "iteration 1/3" in msg1
 
 
 def test_run_with_progress_tolerates_no_context():
@@ -115,6 +119,16 @@ def test_isolate_runs_in_worktree_and_reports_it():
 
 def test_backends_listed():
     assert "mock" in BACKENDS and "claude_code" in BACKENDS
+
+
+def test_doctor_reports_backends_and_timeout_guidance(tmp_path):
+    out = doctor_impl(str(tmp_path))
+    assert out["ok"] is True
+    assert out["cwd"]["exists"] is True
+    assert "mock" in out["backends"] and out["backends"]["mock"]["available"] is True
+    assert "claude_code" in out["backends"]
+    assert out["timeouts"]["recommended_mcp_request_timeout_ms"] >= 600000
+    assert any("-32001" in rec for rec in out["recommendations"])
 
 
 def test_build_server_constructs():

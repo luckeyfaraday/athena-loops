@@ -68,16 +68,20 @@ class CliAgent(Agent):
         argv = [self._sub(arg, subs) for arg in self.command]
 
         env = {**os.environ, **self.extra_env} if self.extra_env else None
+        run_kw: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": self.timeout,
+            "cwd": self.cwd,
+            "env": env,
+        }
+        if self._use_stdin:
+            run_kw["input"] = combined
+        else:
+            # Never let nested CLIs inherit the MCP server's JSON-RPC stdin.
+            run_kw["stdin"] = subprocess.DEVNULL
         try:
-            proc = subprocess.run(
-                argv,
-                input=combined if self._use_stdin else None,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=self.cwd,
-                env=env,
-            )
+            proc = subprocess.run(argv, **run_kw)
         except subprocess.TimeoutExpired as exc:
             partial = (exc.stdout or "")
             if isinstance(partial, bytes):
