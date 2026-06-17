@@ -16,6 +16,7 @@ import pytest
 
 from agentloop.mcp_server import (
     BACKENDS,
+    PLAYWRIGHT_VERIFY_COMMAND,
     _run_with_progress,
     doctor_impl,
     orchestrate_impl,
@@ -31,6 +32,26 @@ def test_orchestrate_impl_mock_completes():
     assert isinstance(out["history"], list) and out["history"]
     # The result must be JSON-serializable (it goes over the wire).
     json.dumps(out)
+
+
+def test_playwright_flag_adds_verify_gate():
+    out = orchestrate_impl("goal", "criteria", backend="mock", max_iterations=1,
+                           playwright=True)
+    names = [v["name"] for t in out["history"] for v in t["verification"]]
+    assert PLAYWRIGHT_VERIFY_COMMAND in names
+
+
+def test_playwright_flag_does_not_duplicate_existing_gate():
+    out = orchestrate_impl("goal", "criteria", backend="mock", max_iterations=1,
+                           playwright=True, verify_commands=[PLAYWRIGHT_VERIFY_COMMAND])
+    names = [v["name"] for t in out["history"] for v in t["verification"]]
+    assert names.count(PLAYWRIGHT_VERIFY_COMMAND) == 1
+
+
+def test_no_playwright_no_verify_gate():
+    out = orchestrate_impl("goal", "criteria", backend="mock", max_iterations=1)
+    names = [v["name"] for t in out["history"] for v in t["verification"]]
+    assert names == []
 
 
 def test_result_carries_readable_summary():

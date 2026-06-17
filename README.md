@@ -153,7 +153,7 @@ python3 -m agentloop.mcp_server        # stdio transport
 ```
 
 Tools:
-- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout, detach=true)`
+- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout, playwright, detach=true)`
   — runs the loop. **Detached by default:** returns `{ status: "running", run_id, … }`
   immediately and runs to completion in the background — you monitor it (see below).
   Pass `detach=false` to instead block and get the result (or `{ status:
@@ -281,6 +281,12 @@ per iteration on stderr; `--goal -` / `--goal-file` read long prompts. `--verify
 is repeatable and runs each command after every iteration in the same repo/worktree
 as the worker. Exit code is `0` if completed, `1` if a budget guard stopped it,
 `2` on error — so scripts and agents can branch on the outcome.
+
+For web/UI work, `--playwright` (MCP: `playwright=true`) is a one-switch shortcut
+that turns on browser-level testing across the whole loop: it adds `npx playwright
+test` as a verify gate *and* instructs the subagent to write/extend Playwright
+tests and the reviewer to require passing ones before completing. Leave
+`--verify-timeout` unset — browser launch is slow.
 
 ## How the user gives input (intake & clarification)
 

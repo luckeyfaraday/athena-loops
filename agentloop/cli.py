@@ -108,7 +108,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         skip_permissions=args.skip_permissions, isolate=not args.no_isolate,
         model=args.model, timeout=args.timeout, max_seconds=args.max_seconds,
         verify_commands=args.verify, verify_timeout=args.verify_timeout,
-        observer=observer,
+        playwright=args.playwright, observer=observer,
     )
 
     if args.ask:
@@ -156,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run a real verification command after each iteration; repeatable")
     r.add_argument("--verify-timeout", type=float, default=None,
                    help="seconds to cap each verification command")
+    r.add_argument("--playwright", action="store_true",
+                   help="encourage browser-level testing for web/UI work: add "
+                        "'npx playwright test' as a verify gate and prompt the "
+                        "subagent to write and the reviewer to require Playwright tests")
     r.add_argument("--skip-permissions", action="store_true",
                    help="let CLI workers use tools without prompting (needs --cwd)")
     r.add_argument("--no-isolate", action="store_true",
