@@ -34,6 +34,7 @@ from .types import (
     ReviewResult,
     Subgoal,
 )
+from .verifier import CommandVerifier, summarize_verification
 
 # A hook called once per cycle with the live state — for logging / progress UIs.
 Observer = Callable[[LoopState], None]
@@ -53,6 +54,7 @@ class Orchestrator:
         checkpoint: Optional[Checkpoint] = None,
         interaction: Optional[Interaction] = None,
         max_clarifying_questions: int = 4,
+        verifier: Optional[CommandVerifier] = None,
     ):
         self.agent = agent
         self.budget = budget or Budget()
@@ -64,6 +66,7 @@ class Orchestrator:
         # never block; pass ConsoleInteraction/SuspendInteraction for real UX.
         self.interaction = interaction or AutoInteraction()
         self.max_clarifying_questions = max_clarifying_questions
+        self.verifier = verifier
         self._lock = threading.Lock()
 
     # --- intake -------------------------------------------------------------
@@ -153,11 +156,17 @@ class Orchestrator:
             # 4. Aggregate finished task outputs.
             aggregated = aggregate(results)
 
-            # 5. Reviewer agent — quality / consistency / goal-alignment gates.
-            review = self._review(state, aggregated, count_call)
+            # 5. Run deterministic verification commands, if configured.
+            verification = self.verifier.run() if self.verifier else []
+            verification_text = summarize_verification(verification)
+
+            # 6. Reviewer agent — quality / consistency / goal-alignment gates.
+            review = self._review(state, aggregated, verification_text, count_call)
 
             state.history.append(
-                IterationTrace(state.iteration, subgoals, results, aggregated, review)
+                IterationTrace(
+                    state.iteration, subgoals, results, aggregated, review, verification
+                )
             )
             if self.observer:
                 self.observer(state)
@@ -171,14 +180,15 @@ class Orchestrator:
                 except Exception:  # noqa: BLE001 — checkpointing is best-effort
                     pass
 
-            # 6 & 7. Goal completed? YES -> deliver. NO -> refine and loop.
+            # 7 & 8. Goal completed? YES -> deliver. NO -> refine and loop.
             all_ok = all(r.ok for r in results)
-            if review.gates_passed and review.goal_complete and all_ok:
+            verification_ok = all(r.ok for r in verification)
+            if review.gates_passed and review.goal_complete and all_ok and verification_ok:
                 return self._finish(state, completed=True, stop_reason="goal_complete",
                                     final=aggregated)
 
             # Feedback loop: update context, refine plan, adjust subgoals/tasks.
-            state.feedback = build_feedback(results, review)
+            state.feedback = build_feedback(results, review, verification)
 
     # --- stages (each is one Agent call against the shared interface) --------
 
@@ -218,14 +228,17 @@ class Orchestrator:
         raise TypeError(f"unsupported subgoal item type: {type(item).__name__}")
 
     def _review(
-        self, state: LoopState, aggregated: str, count_call: Callable[[], None]
+        self, state: LoopState, aggregated: str, verification: str,
+        count_call: Callable[[], None]
     ) -> ReviewResult:
         count_call()
         resp = self.agent.run(
             AgentRequest(
                 role="reviewer",
                 system=REVIEWER_SYSTEM,
-                prompt=review_prompt(state.goal, state.success_criteria, aggregated),
+                prompt=review_prompt(
+                    state.goal, state.success_criteria, aggregated, verification
+                ),
                 expects_json=True,
             )
         )

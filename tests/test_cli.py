@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from agentloop.cli import main
 
@@ -63,6 +64,16 @@ def test_progress_streams_ndjson_to_stderr(capsys):
     err = capsys.readouterr().err.strip().splitlines()
     lines = [json.loads(l) for l in err if l.startswith("{")]
     assert [l["iteration"] for l in lines] == [1, 2]
+
+
+def test_verify_option_runs_command(capsys):
+    code = main([
+        "run", "--goal", "g", "--criteria", "c", "--backend", "mock", "--json",
+        "--verify", f"{sys.executable} -c 'print(456)'",
+    ])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["history"][0]["verification"][0]["stdout"].strip() == "456"
 
 
 def test_backends_subcommand(capsys):

@@ -21,6 +21,7 @@ from .adapters import CliAgent, MockAgent
 from .interaction import AutoInteraction, Interaction, NeedInput, SuspendInteraction
 from .orchestrator import Orchestrator
 from .types import Budget, LoopResult, LoopState
+from .verifier import CommandVerifier, parse_verify_command
 from .worktree import Worktree, worktree
 
 # Worker backends the server can drive. The caller picks one per request.
@@ -80,6 +81,18 @@ def _result_dict(result: LoopResult, wt: Optional[Worktree]) -> dict[str, Any]:
                     "goal_complete": t.review.goal_complete,
                     "issues": t.review.issues,
                 },
+                "verification": [
+                    {
+                        "name": v.name,
+                        "ok": v.ok,
+                        "exit_code": v.exit_code,
+                        "stdout": v.stdout,
+                        "stderr": v.stderr,
+                        "error": v.error,
+                        "duration": v.duration,
+                    }
+                    for v in t.verification
+                ],
             }
             for t in result.history
         ],
@@ -100,6 +113,7 @@ def _run_loop_impl(
     backend: str, cwd: Optional[str], max_iterations: int, max_task_retries: int,
     skip_permissions: bool, isolate: bool, model: Optional[str],
     timeout: Optional[float], max_seconds: Optional[float],
+    verify_commands: Optional[list[str]], verify_timeout: Optional[float],
     observer: Optional[Callable[[LoopState], None]],
 ) -> dict[str, Any]:
     """Run the loop (intake already done) and return a JSON-serializable result."""
@@ -108,13 +122,22 @@ def _run_loop_impl(
 
     def run_in(workdir: Optional[str], wt: Optional[Worktree]) -> dict[str, Any]:
         agent = _build_agent(backend, workdir, skip_permissions, model, timeout)
+        verifier = None
+        if verify_commands:
+            verifier = CommandVerifier(
+                [parse_verify_command(cmd, timeout=verify_timeout) for cmd in verify_commands],
+                cwd=workdir,
+            )
         # In a worktree, commit after each iteration so partial work is durable
         # even if a later iteration fails or a budget guard stops the run.
         checkpoint = None
         if wt is not None:
             checkpoint = lambda st: wt.commit(  # noqa: E731
                 f"agentloop: iteration {st.iteration}")
-        orch = Orchestrator(agent, budget=budget, observer=observer, checkpoint=checkpoint)
+        orch = Orchestrator(
+            agent, budget=budget, observer=observer, checkpoint=checkpoint,
+            verifier=verifier,
+        )
         return _result_dict(orch.run_loop(goal, criteria, clarifications), wt)
 
     # A repo + isolation -> run inside a throwaway worktree so workers never touch
@@ -138,6 +161,8 @@ def orchestrate_impl(
     model: Optional[str] = None,
     timeout: Optional[float] = None,
     max_seconds: Optional[float] = None,
+    verify_commands: Optional[list[str]] = None,
+    verify_timeout: Optional[float] = None,
     interaction: Optional[Interaction] = None,
     observer: Optional[Callable[[LoopState], None]] = None,
 ) -> dict[str, Any]:
@@ -163,7 +188,8 @@ def orchestrate_impl(
         goal, criteria, clarifications, backend=backend, cwd=cwd,
         max_iterations=max_iterations, max_task_retries=max_task_retries,
         skip_permissions=skip_permissions, isolate=isolate, model=model,
-        timeout=timeout, max_seconds=max_seconds, observer=observer,
+        timeout=timeout, max_seconds=max_seconds, verify_commands=verify_commands,
+        verify_timeout=verify_timeout, observer=observer,
     )
 
 
@@ -220,6 +246,8 @@ def orchestrate_resume_impl(
         skip_permissions=data.get("skip_permissions", False),
         isolate=data.get("isolate", True), model=data.get("model"),
         timeout=data.get("timeout"), max_seconds=data.get("max_seconds"),
+        verify_commands=data.get("verify_commands"),
+        verify_timeout=data.get("verify_timeout"),
     )
 
 
@@ -238,6 +266,7 @@ def _progress_observer(report: Callable[[int, int, str], None]) -> Callable[[Loo
         report(
             t.iteration, total,
             f"iteration {t.iteration}/{total}: {ok}/{len(t.results)} subgoals ok, "
+            f"verification {'pass' if all(v.ok for v in t.verification) else 'fail'}, "
             f"gates {'pass' if t.review.gates_passed else 'fail'}, "
             f"goal {'complete' if t.review.goal_complete else 'incomplete'}",
         )
@@ -296,6 +325,8 @@ def build_server():
         model: Optional[str] = None,
         timeout: Optional[float] = None,
         max_seconds: Optional[float] = None,
+        verify_commands: Optional[list[str]] = None,
+        verify_timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         """Run an orchestrator -> worker -> reviewer loop until the success
         criteria are met (or a budget guard trips), and return the result.
@@ -325,6 +356,9 @@ def build_server():
                 per-call cap. Real coding workers are slow; don't set this low.
             max_seconds: Wall-clock cap on the WHOLE run, checked between
                 iterations. Prefer this over `timeout` to bound a long build.
+            verify_commands: Optional real commands to run after each worker
+                iteration, e.g. ["python3 -m pytest", "npx playwright test"].
+            verify_timeout: Optional seconds cap for each verification command.
 
         Streams a `notifications/progress` update per iteration as it runs, so the
         calling agent can show live status instead of a bare spinner.
@@ -338,6 +372,7 @@ def build_server():
             goal, success_criteria, backend=backend, cwd=cwd,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
+            verify_commands=verify_commands, verify_timeout=verify_timeout,
             observer=observer,
         ))
 

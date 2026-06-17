@@ -26,7 +26,10 @@ from .types import (
     Subgoal,
     TaskResult,
     TaskStatus,
+    VerifyCommand,
+    VerifyResult,
 )
+from .verifier import CommandVerifier, parse_verify_command, summarize_verification
 
 __all__ = [
     "Agent",
@@ -45,6 +48,11 @@ __all__ = [
     "Subgoal",
     "TaskResult",
     "TaskStatus",
+    "VerifyCommand",
+    "VerifyResult",
+    "CommandVerifier",
+    "parse_verify_command",
+    "summarize_verification",
     "ReviewResult",
     "IterationTrace",
     "LoopResult",

@@ -46,6 +46,8 @@ def _progress(state: LoopState) -> None:
         "iteration": t.iteration,
         "subgoals_ok": sum(r.ok for r in t.results),
         "subgoals_total": len(t.results),
+        "verification_ok": all(v.ok for v in t.verification),
+        "verification_total": len(t.verification),
         "goal_complete": t.review.goal_complete,
     }
     print(json.dumps(line), file=sys.stderr, flush=True)
@@ -105,6 +107,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         backend=args.backend, cwd=args.cwd, max_iterations=args.max_iterations,
         skip_permissions=args.skip_permissions, isolate=not args.no_isolate,
         model=args.model, timeout=args.timeout, max_seconds=args.max_seconds,
+        verify_commands=args.verify, verify_timeout=args.verify_timeout,
         observer=observer,
     )
 
@@ -149,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds to cap EACH worker CLI call (default: no cap)")
     r.add_argument("--max-seconds", type=float, default=None,
                    help="wall-clock cap on the whole run (checked between iterations)")
+    r.add_argument("--verify", action="append", metavar="COMMAND",
+                   help="run a real verification command after each iteration; repeatable")
+    r.add_argument("--verify-timeout", type=float, default=None,
+                   help="seconds to cap each verification command")
     r.add_argument("--skip-permissions", action="store_true",
                    help="let CLI workers use tools without prompting (needs --cwd)")
     r.add_argument("--no-isolate", action="store_true",

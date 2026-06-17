@@ -3,7 +3,9 @@ failures are captured, and budget guards stop runaway loops."""
 
 from __future__ import annotations
 
-from agentloop import Budget, Orchestrator, extract_json
+import sys
+
+from agentloop import Budget, CommandVerifier, Orchestrator, VerifyCommand, extract_json
 from agentloop.adapters import MockAgent
 from agentloop.agent import AgentRequest
 
@@ -75,6 +77,39 @@ def test_checkpoint_error_does_not_break_the_run():
     orch = Orchestrator(MockAgent(accept_on_iteration=1), checkpoint=boom,
                         budget=Budget(max_iterations=2))
     assert orch.run("goal", "criteria").completed  # survives a checkpoint failure
+
+
+def test_verification_failure_blocks_completion_and_feeds_back():
+    verifier = CommandVerifier([
+        VerifyCommand(
+            "failing check",
+            [sys.executable, "-c", "import sys; print('broken'); sys.exit(7)"],
+        )
+    ])
+    orch = Orchestrator(
+        MockAgent(accept_on_iteration=1),
+        budget=Budget(max_iterations=2),
+        verifier=verifier,
+    )
+    result = orch.run("goal", "criteria")
+    assert not result.completed
+    assert result.history[0].verification[0].exit_code == 7
+    assert result.history[0].verification[0].stdout.strip() == "broken"
+    assert result.iterations == 2
+
+
+def test_passing_verification_allows_completion():
+    verifier = CommandVerifier([
+        VerifyCommand("passing check", [sys.executable, "-c", "print('ok')"])
+    ])
+    orch = Orchestrator(
+        MockAgent(accept_on_iteration=1),
+        budget=Budget(max_iterations=2),
+        verifier=verifier,
+    )
+    result = orch.run("goal", "criteria")
+    assert result.completed
+    assert result.history[0].verification[0].ok
 
 
 def test_extract_json_recovers_from_prose_and_fences():
