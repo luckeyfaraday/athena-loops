@@ -20,6 +20,8 @@ class MockAgent(Agent):
         subgoals: Optional[list[str]] = None,
         accept_on_iteration: int = 2,
         subagent_fn: Optional[Callable[[AgentRequest], str]] = None,
+        questions: Optional[list[str]] = None,
+        proposed_criteria: str = "The stated goal is fully satisfied.",
     ):
         self.subgoals = subgoals or [
             "Research the topic and gather sources",
@@ -28,9 +30,17 @@ class MockAgent(Agent):
         ]
         self.accept_on_iteration = accept_on_iteration
         self.subagent_fn = subagent_fn
+        self.questions = questions or []   # default: no clarifying questions
+        self.proposed_criteria = proposed_criteria
         self._review_calls = 0
 
     def run(self, request: AgentRequest) -> AgentResponse:
+        if request.role == "criteria":
+            return AgentResponse(self.proposed_criteria)
+
+        if request.role == "clarifier":
+            return AgentResponse(json.dumps(self.questions))
+
         if request.role == "decomposer":
             return AgentResponse(json.dumps(
                 [{"id": f"s{i+1}", "description": d} for i, d in enumerate(self.subgoals)]

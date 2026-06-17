@@ -62,7 +62,12 @@ def main() -> None:
             if wt.changed():
                 print(f"\nchanged files: {wt.changed_files()}")
     else:
-        run_against(which, None)
+        # No repo given: run in a throwaway temp dir so a coding worker can never
+        # write into the current project. (Pass a REPO_DIR for a real run.)
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="agentloop-demo-") as tmp:
+            print(f"[throwaway dir] {tmp}")
+            run_against(which, tmp)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,19 @@ from __future__ import annotations
 
 from .types import Subgoal, TaskResult
 
+CRITERIA_SYSTEM = """\
+You turn a user's goal into clear, checkable success criteria — the concrete \
+conditions that mean the goal is done. Keep it short. Respond with ONLY the \
+criteria as a brief paragraph or bullet list, no preamble."""
+
+CLARIFIER_SYSTEM = """\
+You are doing intake before any work begins. Identify only the questions whose \
+answers you genuinely need from the user to proceed well — real ambiguities or \
+missing decisions that would change the plan, not nice-to-haves. If the task is \
+already clear enough to start, return an empty list.
+
+Respond with ONLY a JSON array of question strings."""
+
 DECOMPOSER_SYSTEM = """\
 You are the Orchestrator. Break the user's goal into the SMALLEST set of \
 independent subgoals that, if each is completed, fully satisfy the success \
@@ -40,8 +53,24 @@ Respond with ONLY a JSON object:
 Be strict: goal_complete is true only if every success criterion is met."""
 
 
-def decompose_prompt(goal: str, success_criteria: str, feedback: str) -> str:
+def criteria_prompt(goal: str) -> str:
+    return f"GOAL:\n{goal}\n\nWrite the success criteria."
+
+
+def clarify_prompt(goal: str, success_criteria: str, max_questions: int) -> str:
+    return (
+        f"GOAL:\n{goal}\n\nSUCCESS CRITERIA:\n{success_criteria}\n\n"
+        f"List at most {max_questions} questions you need answered before planning "
+        f"(JSON array of strings; return [] if the task is clear enough to start)."
+    )
+
+
+def decompose_prompt(
+    goal: str, success_criteria: str, feedback: str, clarifications: str = ""
+) -> str:
     parts = [f"GOAL:\n{goal}", f"\nSUCCESS CRITERIA:\n{success_criteria}"]
+    if clarifications:
+        parts.append("\nCLARIFICATIONS FROM THE USER:\n" + clarifications)
     if feedback:
         parts.append(
             "\nThis is a REFINEMENT pass. The previous attempt was not accepted. "

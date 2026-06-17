@@ -8,6 +8,13 @@
 """
 
 from .agent import Agent, AgentRequest, AgentResponse, extract_json
+from .interaction import (
+    AutoInteraction,
+    ConsoleInteraction,
+    Interaction,
+    NeedInput,
+    SuspendInteraction,
+)
 from .orchestrator import Orchestrator
 from .worktree import Worktree, worktree
 from .types import (
@@ -26,6 +33,11 @@ __all__ = [
     "AgentRequest",
     "AgentResponse",
     "extract_json",
+    "Interaction",
+    "AutoInteraction",
+    "ConsoleInteraction",
+    "SuspendInteraction",
+    "NeedInput",
     "Orchestrator",
     "Worktree",
     "worktree",

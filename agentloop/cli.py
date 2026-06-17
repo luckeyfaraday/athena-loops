@@ -19,7 +19,13 @@ import json
 import sys
 from typing import Optional
 
-from .mcp_server import BACKENDS, orchestrate_impl
+from .interaction import AutoInteraction, ConsoleInteraction
+from .mcp_server import (
+    BACKENDS,
+    orchestrate_impl,
+    orchestrate_resume_impl,
+    orchestrate_suspendable,
+)
 from .types import LoopState
 
 
@@ -45,20 +51,28 @@ def _progress(state: LoopState) -> None:
     print(json.dumps(line), file=sys.stderr, flush=True)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    goal = _read(args.goal, args.goal_file, "goal")
-    criteria = _read(args.criteria, args.criteria_file, "criteria")
+def _resolve_goal(args: argparse.Namespace) -> str:
+    if args.goal or args.goal_file:
+        return _read(args.goal, args.goal_file, "goal")
+    if sys.stdin.isatty():  # interactive wizard: ask for the goal
+        g = input("Goal> ").strip()
+        if g:
+            return g
+    raise SystemExit("error: provide --goal or --goal-file")
 
-    result = orchestrate_impl(
-        goal, criteria,
-        backend=args.backend,
-        cwd=args.cwd,
-        max_iterations=args.max_iterations,
-        skip_permissions=args.skip_permissions,
-        isolate=not args.no_isolate,
-        model=args.model,
-        observer=_progress if args.progress else None,
-    )
+
+def _emit(result: dict, args: argparse.Namespace) -> int:
+    if result.get("status") == "needs_input":
+        if args.json:
+            json.dump(result, sys.stdout)
+            print()
+        else:
+            print("The orchestrator needs answers before it can start:")
+            for i, q in enumerate(result["questions"], 1):
+                print(f"  {i}. {q}")
+            print("\nRe-run with: --resume <token> --answer <a1> --answer <a2> ...")
+            print(f"\ntoken: {result['token']}")
+        return 3  # distinct exit code: suspended, awaiting input
 
     if args.json:
         json.dump(result, sys.stdout)
@@ -72,8 +86,38 @@ def cmd_run(args: argparse.Namespace) -> int:
                   f"changed={wt['changed_files']}")
         print("---")
         print(result["final_output"])
-
     return 0 if result["completed"] else 1
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    observer = _progress if args.progress else None
+
+    # Resume a previously suspended run with the user's answers.
+    if args.resume:
+        return _emit(orchestrate_resume_impl(args.resume, args.answer or [],
+                                             observer=observer), args)
+
+    goal = _resolve_goal(args)
+    criteria = (_read(args.criteria, args.criteria_file, "criteria")
+                if (args.criteria or args.criteria_file) else "")
+
+    common = dict(
+        backend=args.backend, cwd=args.cwd, max_iterations=args.max_iterations,
+        skip_permissions=args.skip_permissions, isolate=not args.no_isolate,
+        model=args.model, observer=observer,
+    )
+
+    if args.ask:
+        # Suspend mode: return needs_input + token instead of blocking (for tools).
+        result = orchestrate_suspendable(goal, criteria, answers=args.answer or None,
+                                         **common)
+    else:
+        # Interactive terminal -> prompt the human; piped/--json -> proceed headless.
+        interactive = sys.stdin.isatty() and not args.json and not args.non_interactive
+        interaction = ConsoleInteraction() if interactive else AutoInteraction()
+        result = orchestrate_impl(goal, criteria, interaction=interaction, **common)
+
+    return _emit(result, args)
 
 
 def cmd_backends(args: argparse.Namespace) -> int:
@@ -108,6 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--json", action="store_true", help="emit full result as JSON")
     r.add_argument("--progress", action="store_true",
                    help="stream per-iteration NDJSON to stderr")
+    r.add_argument("--non-interactive", action="store_true",
+                   help="never prompt; proceed with best-judgment defaults")
+    r.add_argument("--ask", action="store_true",
+                   help="if clarification is needed, print questions + a resume "
+                        "token and exit 3 instead of prompting")
+    r.add_argument("--resume", metavar="TOKEN",
+                   help="resume a suspended run using the token from --ask")
+    r.add_argument("--answer", action="append", metavar="TEXT",
+                   help="an answer to a clarifying question (repeat in order)")
     r.set_defaults(func=cmd_run)
 
     b = sub.add_parser("backends", help="list worker backends")

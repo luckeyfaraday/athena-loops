@@ -96,6 +96,7 @@ class LoopState:
     iteration: int = 0
     agent_calls: int = 0
     feedback: str = ""           # the "Update context, refine plan" signal
+    clarifications: str = ""     # Q/A gathered during intake, fed into decomposition
     started_at: float = field(default_factory=time.monotonic)
     history: list[IterationTrace] = field(default_factory=list)
 

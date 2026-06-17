@@ -1,7 +1,13 @@
-# agentloop
+# agentloop — backend-agnostic AI agent orchestration loop for Python
 
-A backend-agnostic implementation of the **AI Agent Orchestration Loop** —
-the orchestrator → worker → reviewer pattern with a closed feedback loop.
+**agentloop** is a lightweight Python framework for multi-agent orchestration. It
+implements the **orchestrator → worker → reviewer pattern** (the AI agent
+orchestration loop) as a deterministic harness with a closed feedback loop: a goal
+is decomposed into subtasks, fanned out to worker subagents, aggregated, and run
+through a review gate that loops until the work meets its success criteria. One
+loop drives any LLM backend — Anthropic Claude, Claude Code, Codex, opencode, or
+aider — through a single `Agent` interface, and it ships as both an **MCP server**
+and a plain CLI so any coding agent can call it.
 
 The design principle: **the loop is a harness (deterministic code), not a skill.**
 A prompt can *describe* "decompose, review, loop until done" but can't *guarantee*
@@ -157,6 +163,44 @@ per iteration on stderr; `--goal -` / `--goal-file` read long prompts. Exit code
 is `0` if completed, `1` if a budget guard stopped it, `2` on error — so scripts
 and agents can branch on the outcome.
 
+## How the user gives input (intake & clarification)
+
+Before any planning, the loop runs an **intake** phase: it can propose success
+criteria (if you didn't give any) and ask the clarifying questions it needs —
+the diagram's "App Follow-up Questions". *Where* the human answers is a second
+swappable seam, `Interaction`, mirroring the `Agent` seam:
+
+| Surface | Interaction | UX |
+|---|---|---|
+| Python / headless (default) | `AutoInteraction` | never blocks; proceeds with best judgment |
+| Interactive terminal | `ConsoleInteraction` | prompts the human via `input()` |
+| MCP / scripted CLI | `SuspendInteraction` | returns `needs_input` + a resume token instead of blocking |
+
+**Terminal wizard** — omit `--goal` and it asks; criteria and clarifying
+questions are prompted inline:
+
+```bash
+agentloop run                         # Goal> … then proposes criteria + asks questions
+agentloop run --goal "…" --non-interactive   # never prompt; use defaults
+```
+
+**Inside another agent (MCP)** — `orchestrate(...)` returns
+`{ status: "needs_input", questions: [...], token }` when it needs answers; the
+host agent collects them from the user and calls
+`orchestrate_resume(token, answers)` to continue. Same flow on the CLI for tools:
+
+```bash
+agentloop run --goal "build an API" --ask        # prints questions + token, exits 3
+agentloop run --resume <token> --answer "FastAPI" --answer "Postgres"
+```
+
+**Python** — pass your own:
+
+```python
+from agentloop import Orchestrator, ConsoleInteraction
+Orchestrator(agent, interaction=ConsoleInteraction()).run(goal="…")  # criteria optional
+```
+
 ## The seam (where to put what)
 
 | Layer | Lives in | What it owns |
@@ -202,3 +246,32 @@ agentloop/
 examples/run_demo.py
 tests/test_orchestrator.py
 ```
+
+## FAQ
+
+**What is agentloop?** A backend-agnostic Python framework that implements the AI
+agent orchestration loop — the orchestrator–worker–reviewer pattern with a closed
+feedback loop — as deterministic harness code rather than a prompt.
+
+**What is the orchestrator–worker–reviewer pattern?** An LLM agent decomposes a
+goal into subtasks (orchestrator), parallel worker subagents execute them, and a
+reviewer gates the aggregated result against success criteria, looping with
+refined plans until done or a budget guard stops it.
+
+**Which LLM backends does agentloop support?** Any model behind a single
+`Agent.run()` method. Built-in adapters cover a dependency-free MockAgent, the
+Anthropic Claude SDK, and headless coding-agent CLIs — Claude Code, Codex,
+opencode, and aider — via `CliAgent`.
+
+**How do I orchestrate multiple coding agents from Claude Code, Cursor, or Cline?**
+Run agentloop as an MCP server (`python3 -m agentloop.mcp_server`) and call its
+`orchestrate` tool, or use the plain `agentloop run` CLI from any agent that has a
+shell.
+
+**Does agentloop need an API key?** No — when you drive it through a coding-agent
+CLI it piggybacks on that CLI's own login, so a Claude.ai or ChatGPT subscription
+OAuth session works without an `ANTHROPIC_API_KEY`.
+
+**How does agentloop avoid infinite agent loops?** A `Budget` caps iterations,
+wall-clock time, and total agent calls, and a failing subagent becomes a `FAILED`
+task result (with retries) instead of crashing or silently vanishing.
