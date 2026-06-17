@@ -72,6 +72,29 @@ Two knobs for autonomous coding workers:
 Auth piggybacks on the CLI's own login, so a Claude.ai / ChatGPT **subscription
 OAuth** session works with no API key.
 
+**Isolated runs.** The safe default for `skip_permissions` is to run inside a
+throwaway git worktree on its own branch — your main checkout is never touched:
+
+```python
+from agentloop import Orchestrator, worktree
+from agentloop.adapters import CliAgent
+
+with worktree("/path/to/repo") as wt:               # new branch + checkout
+    agent = CliAgent.claude_code(cwd=wt.path, skip_permissions=True)
+    Orchestrator(agent).run(goal="...", success_criteria="...")
+    print(wt.changed_files())   # what the run touched
+    wt.commit("agentloop run")  # optional: persist on the branch
+```
+
+Cleanup mirrors the harness's own worktrees: `cleanup="auto"` (default) **keeps**
+the worktree iff the run changed something (so you can inspect/merge the branch)
+and removes it if it left nothing; `"always"` / `"never"` force the choice. The
+example runner isolates automatically when given a repo:
+
+```bash
+python3 -m examples.run_with_cli_agent claude /path/to/repo
+```
+
 ```bash
 python3 -m examples.run_with_cli_agent claude   # codex | opencode | aider
 ```

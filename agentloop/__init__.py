@@ -9,6 +9,7 @@
 
 from .agent import Agent, AgentRequest, AgentResponse, extract_json
 from .orchestrator import Orchestrator
+from .worktree import Worktree, worktree
 from .types import (
     Budget,
     IterationTrace,
@@ -26,6 +27,8 @@ __all__ = [
     "AgentResponse",
     "extract_json",
     "Orchestrator",
+    "Worktree",
+    "worktree",
     "Budget",
     "Subgoal",
     "TaskResult",
