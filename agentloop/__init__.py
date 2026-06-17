@@ -20,6 +20,7 @@ from .worktree import Worktree, worktree
 from .types import (
     Budget,
     IterationTrace,
+    LoopEvent,
     LoopResult,
     LoopState,
     ReviewResult,
@@ -55,6 +56,7 @@ __all__ = [
     "summarize_verification",
     "ReviewResult",
     "IterationTrace",
+    "LoopEvent",
     "LoopResult",
     "LoopState",
 ]

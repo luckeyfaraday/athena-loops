@@ -24,6 +24,7 @@ from typing import Any, Callable, Optional
 from .adapters import CliAgent, MockAgent
 from .interaction import AutoInteraction, Interaction, NeedInput, SuspendInteraction
 from .orchestrator import Orchestrator
+from .runs import MANAGER, run_base
 from .types import Budget, LoopResult, LoopState
 from .verifier import CommandVerifier, parse_verify_command
 from .worktree import Worktree, worktree
@@ -228,6 +229,7 @@ def _run_loop_impl(
     timeout: Optional[float], max_seconds: Optional[float],
     verify_commands: Optional[list[str]], verify_timeout: Optional[float],
     observer: Optional[Callable[[LoopState], None]],
+    emit: Optional[Callable[[str, int, dict], None]] = None,
 ) -> dict[str, Any]:
     """Run the loop (intake already done) and return a JSON-serializable result."""
     budget = Budget(max_iterations=max_iterations, max_task_retries=max_task_retries,
@@ -249,7 +251,7 @@ def _run_loop_impl(
                 f"agentloop: iteration {st.iteration}")
         orch = Orchestrator(
             agent, budget=budget, observer=observer, checkpoint=checkpoint,
-            verifier=verifier,
+            verifier=verifier, emit=emit,
         )
         return _result_dict(orch.run_loop(goal, criteria, clarifications), wt)
 
@@ -318,6 +320,121 @@ def orchestrate_impl(
         return _error_result(exc, stage="loop")
 
 
+# --- detached runs (live visibility: start, then status/tail/result) ---------
+
+def _intake(goal: str, success_criteria: str, kw: dict[str, Any],
+            interaction: Interaction) -> tuple[str, str, str]:
+    """Run intake against a freshly built agent. May raise NeedInput."""
+    agent = _build_agent(
+        kw.get("backend", "claude_code"), kw.get("cwd"),
+        kw.get("skip_permissions", False), kw.get("model"), kw.get("timeout"),
+    )
+    orch = Orchestrator(
+        agent, budget=Budget(max_iterations=kw.get("max_iterations", 4)),
+        interaction=interaction,
+    )
+    return orch.intake(goal, success_criteria)
+
+
+def _launch(goal: str, criteria: str, clarifications: str, *,
+            kw: dict[str, Any], base_dir: Optional[str]) -> dict[str, Any]:
+    """Start the loop on a background thread and return its run_id immediately."""
+    cwd = kw.get("cwd")
+    base = base_dir or run_base(cwd)
+    meta = {
+        "goal": goal, "success_criteria": criteria,
+        "backend": kw.get("backend", "claude_code"), "cwd": cwd,
+        "max_iterations": kw.get("max_iterations", 4),
+        "isolate": kw.get("isolate", True),
+    }
+
+    def thunk(emit: Callable[[str, int, dict], None]) -> dict[str, Any]:
+        try:
+            return _run_loop_impl(
+                goal, criteria, clarifications, emit=emit, observer=None,
+                backend=kw.get("backend", "claude_code"), cwd=cwd,
+                max_iterations=kw.get("max_iterations", 4),
+                max_task_retries=kw.get("max_task_retries", 1),
+                skip_permissions=kw.get("skip_permissions", False),
+                isolate=kw.get("isolate", True), model=kw.get("model"),
+                timeout=kw.get("timeout"), max_seconds=kw.get("max_seconds"),
+                verify_commands=kw.get("verify_commands"),
+                verify_timeout=kw.get("verify_timeout"),
+            )
+        except Exception as exc:  # noqa: BLE001 — record as a failed result, not a torn thread
+            return _error_result(exc, stage="loop")
+
+    handle = MANAGER.start(thunk=thunk, meta=meta, base=base)
+    events_path = os.path.join(handle.run_dir, "events.jsonl")
+    return {
+        "status": "running",
+        "run_id": handle.run_id,
+        "run_dir": handle.run_dir,
+        "events_path": events_path,
+        "tail_command": f"tail -f {events_path}",
+        "message": (
+            "Orchestration started in the background. Poll orchestrate_status(run_id) "
+            "and orchestrate_tail(run_id, cursor) to watch it live, or "
+            "orchestrate_result(run_id, wait=true) for the final result. A human can "
+            f"`tail -f` the events file directly."
+        ),
+    }
+
+
+def orchestrate_start_impl(
+    goal: str, success_criteria: str = "", *,
+    base_dir: Optional[str] = None, answers: Optional[list[str]] = None, **kw: Any,
+) -> dict[str, Any]:
+    """Detached `orchestrate`: do intake synchronously, then run in the background.
+
+    Returns immediately with either { status: "needs_input", questions, token }
+    (intake needs answers — resume with orchestrate_resume(detach=true)) or
+    { status: "running", run_id, run_dir, events_path } once the loop is launched.
+    Unknown backends and other input errors raise loudly before anything starts.
+    """
+    backend = kw.get("backend", "claude_code")
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
+    try:
+        goal, criteria, clarifications = _intake(
+            goal, success_criteria, kw, SuspendInteraction(answers))
+    except NeedInput as ni:
+        return {
+            "status": "needs_input",
+            "questions": ni.questions,
+            "token": _encode_token({
+                "goal": ni.goal or goal,
+                "criteria": ni.criteria or success_criteria,
+                "questions": ni.questions, **kw,
+            }),
+        }
+    except Exception as exc:  # noqa: BLE001 - preserve response shape on backend failure
+        return _error_result(exc, stage="intake")
+    return _launch(goal, criteria, clarifications, kw=kw, base_dir=base_dir)
+
+
+def orchestrate_status_impl(run_id: str) -> dict[str, Any]:
+    """Light status for a detached run: phase, iteration, running, event count."""
+    return MANAGER.status(run_id)
+
+
+def orchestrate_tail_impl(run_id: str, cursor: int = 0, limit: int = 200) -> dict[str, Any]:
+    """Events for a detached run with seq > cursor; pass back `cursor` to continue."""
+    return MANAGER.tail(run_id, cursor, limit)
+
+
+def orchestrate_result_impl(
+    run_id: str, wait: bool = False, timeout: Optional[float] = None
+) -> dict[str, Any]:
+    """Final result of a detached run, or a running-status dict if not done yet."""
+    return MANAGER.result(run_id, wait, timeout)
+
+
+def orchestrate_list_impl() -> dict[str, Any]:
+    """Status of every detached run this server has started."""
+    return MANAGER.list_runs()
+
+
 # --- suspend / resume (for stateless surfaces: MCP, scripted CLI) ------------
 
 def _encode_token(data: dict[str, Any]) -> str:
@@ -351,10 +468,12 @@ def orchestrate_suspendable(
 def orchestrate_resume_impl(
     token: str, answers: list[str], *,
     observer: Optional[Callable[[LoopState], None]] = None,
+    detach: bool = False, base_dir: Optional[str] = None,
 ) -> dict[str, Any]:
     """Resume a suspended run: fold the answers into context and run the loop.
 
     Uses the questions cached in the token (no re-clarify, no double agent call).
+    With detach=true the resumed loop runs in the background and returns a run_id.
     """
     data = _decode_token(token)
     questions = data.pop("questions", [])
@@ -363,6 +482,8 @@ def orchestrate_resume_impl(
     clarifications = "\n".join(
         f"Q: {q}\nA: {a}" for q, a in zip(questions, answers)
     )
+    if detach:
+        return _launch(goal, criteria, clarifications, kw=data, base_dir=base_dir)
     return _run_loop_impl(
         goal, criteria, clarifications, observer=observer,
         backend=data.get("backend", "claude_code"), cwd=data.get("cwd"),
@@ -459,6 +580,7 @@ def build_server():
         max_seconds: Optional[float] = None,
         verify_commands: Optional[list[str]] = None,
         verify_timeout: Optional[float] = None,
+        detach: bool = False,
     ) -> dict[str, Any]:
         """Run an orchestrator -> worker -> reviewer loop until the success
         criteria are met (or a budget guard trips), and return the result.
@@ -501,18 +623,33 @@ def build_server():
             verify_commands: Optional real commands to run after each worker
                 iteration, e.g. ["python3 -m pytest", "npx playwright test"].
             verify_timeout: Optional seconds cap for each verification command.
+            detach: Run in the background instead of blocking. Returns a run_id
+                immediately; watch it live with orchestrate_status / orchestrate_tail
+                and fetch the result with orchestrate_result(run_id, wait=true). Use
+                this to avoid being blind until the whole loop finishes and to dodge
+                MCP request timeouts entirely on long coding runs.
 
         Streams a `notifications/progress` update when starting and per iteration
         as it runs, so the calling agent can show live status instead of a bare
         spinner. Some hosts still enforce a separate MCP request timeout even
         when progress notifications are emitted; configure that host timeout to
-        a large value (recommended: 600000 ms or more) for real coding runs.
+        a large value (recommended: 600000 ms or more) for real coding runs — or
+        pass detach=true and poll.
 
         Returns:
-            Either { status: "needs_input", questions[], token } or
+            With detach=true: { status: "running", run_id, run_dir, events_path }
+            (or { status: "needs_input", questions[], token } if intake asks).
+            Otherwise: { status: "needs_input", questions[], token } or
             { completed, iterations, stop_reason, final_output, summary,
               history[], worktree?{ path, branch, changed_files } }
         """
+        if detach:
+            return orchestrate_start_impl(
+                goal, success_criteria, backend=backend, cwd=cwd,
+                max_iterations=max_iterations, skip_permissions=skip_permissions,
+                isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
+                verify_commands=verify_commands, verify_timeout=verify_timeout,
+            )
         return await _run_with_progress(_ctx(), lambda observer: orchestrate_suspendable(
             goal, success_criteria, backend=backend, cwd=cwd,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
@@ -525,20 +662,75 @@ def build_server():
         ))
 
     @mcp.tool()
-    async def orchestrate_resume(token: str, answers: list[str]) -> dict[str, Any]:
+    async def orchestrate_resume(
+        token: str, answers: list[str], detach: bool = False
+    ) -> dict[str, Any]:
         """Resume a run that returned `needs_input`.
 
         Args:
             token: The opaque token from the `needs_input` response.
             answers: One answer per question, in the order they were asked.
+            detach: Run the resumed loop in the background and return a run_id
+                (watch with orchestrate_status / orchestrate_tail), instead of
+                blocking until it finishes.
 
-        Returns: the same result shape as a completed `orchestrate` call (and
-        streams per-iteration progress the same way).
+        Returns: with detach=true, { status: "running", run_id, ... }; otherwise
+        the same result shape as a completed `orchestrate` call (and streams
+        per-iteration progress the same way).
         """
+        if detach:
+            return orchestrate_resume_impl(token, answers, detach=True)
         return await _run_with_progress(
             _ctx(), lambda observer: orchestrate_resume_impl(token, answers, observer=observer),
             start_message="resuming orchestration from answers",
         )
+
+    @mcp.tool()
+    def orchestrate_status(run_id: str) -> dict[str, Any]:
+        """Light status of a detached run: phase, current iteration, whether it is
+        still running, and how many events it has produced. Cheap to poll often.
+
+        Args:
+            run_id: The id returned by orchestrate(detach=true).
+        """
+        return orchestrate_status_impl(run_id)
+
+    @mcp.tool()
+    def orchestrate_tail(run_id: str, cursor: int = 0, limit: int = 200) -> dict[str, Any]:
+        """Read what the loop has done since `cursor` — the live window into a
+        detached run: decomposed subgoals, each worker's start/finish and output
+        preview, verification, and the reviewer's verdict.
+
+        Args:
+            run_id: The id returned by orchestrate(detach=true).
+            cursor: Return only events with seq greater than this (0 = from start).
+            limit: Max events to return; pass the returned `cursor` back to page on.
+
+        Returns { events[], cursor, running, more }. Full worker output for each
+        finished subagent is at data.output_path (also under <run_dir>/workers/).
+        """
+        return orchestrate_tail_impl(run_id, cursor, limit)
+
+    @mcp.tool()
+    def orchestrate_result(
+        run_id: str, wait: bool = False, timeout: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Fetch the final result of a detached run.
+
+        Args:
+            run_id: The id returned by orchestrate(detach=true).
+            wait: If true, block up to `timeout` seconds for the run to finish.
+            timeout: Seconds to wait when wait=true (None = until it finishes).
+
+        Returns the same result shape as a blocking `orchestrate` call once done,
+        or a { status: "running", ... } dict if it is still going.
+        """
+        return orchestrate_result_impl(run_id, wait, timeout)
+
+    @mcp.tool()
+    def orchestrate_list() -> dict[str, Any]:
+        """List every detached run this server has started, with its status."""
+        return orchestrate_list_impl()
 
     @mcp.tool()
     def list_backends() -> dict[str, Any]:

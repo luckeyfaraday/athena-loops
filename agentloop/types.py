@@ -109,6 +109,53 @@ class LoopResult:
     history: list[IterationTrace] = field(default_factory=list)
 
 
+# --- live events (the observability stream) ---------------------------------
+#
+# Without these a run is a black box: the caller sees nothing until the whole
+# loop returns. Each meaningful step emits a LoopEvent so the human (via a
+# tail-able events.jsonl) and the calling agent (via the orchestrate_tail tool)
+# can watch the loop work in real time. The orchestrator emits the iteration
+# events; the scheduler emits the subagent ones; the detached launcher emits the
+# run-level bookends.
+EVENT_RUN_STARTED = "run_started"
+EVENT_ITERATION_STARTED = "iteration_started"
+EVENT_DECOMPOSED = "decomposed"
+EVENT_SUBAGENT_STARTED = "subagent_started"
+EVENT_SUBAGENT_FINISHED = "subagent_finished"
+EVENT_SUBAGENT_FAILED = "subagent_failed"
+EVENT_AGGREGATED = "aggregated"
+EVENT_VERIFICATION = "verification"
+EVENT_REVIEW = "review"
+EVENT_ITERATION_FINISHED = "iteration_finished"
+EVENT_RUN_FINISHED = "run_finished"
+EVENT_RUN_ERROR = "run_error"
+
+
+@dataclass
+class LoopEvent:
+    """One observable moment in a run — the unit of live visibility.
+
+    `seq` is a per-run monotonic counter that doubles as the tail cursor: ask for
+    everything with seq greater than the last you have seen. `iteration` is 0 for
+    pre-loop (intake/run) events.
+    """
+
+    seq: int
+    ts: float
+    kind: str
+    iteration: int
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "kind": self.kind,
+            "iteration": self.iteration,
+            "data": self.data,
+        }
+
+
 @dataclass
 class LoopState:
     """Mutable state threaded through the loop."""

@@ -27,6 +27,12 @@ from .roles import (
 )
 from .scheduler import execute
 from .types import (
+    EVENT_AGGREGATED,
+    EVENT_DECOMPOSED,
+    EVENT_ITERATION_FINISHED,
+    EVENT_ITERATION_STARTED,
+    EVENT_REVIEW,
+    EVENT_VERIFICATION,
     Budget,
     IterationTrace,
     LoopResult,
@@ -41,6 +47,16 @@ Observer = Callable[[LoopState], None]
 # A hook called after each iteration to persist progress (e.g. commit a worktree),
 # so partial work is never lost if the run later fails or is stopped.
 Checkpoint = Callable[[LoopState], None]
+# A fine-grained event sink, fired at every phase of every iteration so callers
+# can watch the loop live instead of waiting for the final result. Signature is
+# (kind, iteration, data); see types.EVENT_* for the kinds.
+Emitter = Callable[[str, int, dict], None]
+
+
+def _preview(text: str, limit: int = 400) -> str:
+    """A short, stream-friendly excerpt of a longer blob for an event payload."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + f"… (+{len(text) - limit} chars)"
 
 
 class Orchestrator:
@@ -55,11 +71,14 @@ class Orchestrator:
         interaction: Optional[Interaction] = None,
         max_clarifying_questions: int = 4,
         verifier: Optional[CommandVerifier] = None,
+        emit: Optional[Emitter] = None,
     ):
         self.agent = agent
         self.budget = budget or Budget()
         self.parallel = parallel
         self.observer = observer
+        # Fine-grained live event sink (None = no streaming). See Emitter.
+        self._emit_cb = emit
         # Called after each iteration to persist partial work (worktree commit).
         self.checkpoint = checkpoint
         # How the loop reaches the human. Default headless so existing callers
@@ -68,6 +87,15 @@ class Orchestrator:
         self.max_clarifying_questions = max_clarifying_questions
         self.verifier = verifier
         self._lock = threading.Lock()
+
+    def _emit(self, kind: str, iteration: int, data: dict) -> None:
+        """Fire a live event, if a sink is attached. Never let it break the run."""
+        if self._emit_cb is None:
+            return
+        try:
+            self._emit_cb(kind, iteration, data)
+        except Exception:  # noqa: BLE001 — observability must never crash the loop
+            pass
 
     # --- intake -------------------------------------------------------------
 
@@ -140,10 +168,20 @@ class Orchestrator:
 
             state.iteration += 1
 
+            # An event sink for this iteration, with the iteration number bound in.
+            def emit(kind: str, data: dict) -> None:
+                self._emit(kind, state.iteration, data)
+
+            emit(EVENT_ITERATION_STARTED, {"max_iterations": self.budget.max_iterations})
+
             # 1. Task decomposition (feedback refines it on later passes).
             subgoals = self._decompose(state, count_call)
+            emit(EVENT_DECOMPOSED, {
+                "subgoals": [{"id": sg.id, "description": sg.description} for sg in subgoals]
+            })
 
-            # 2 & 3. Fan out to subagents, execute, capture failures.
+            # 2 & 3. Fan out to subagents, execute, capture failures. The sink
+            # streams each worker's start/finish (and its output) as it happens.
             results = execute(
                 self.agent,
                 subgoals,
@@ -151,23 +189,44 @@ class Orchestrator:
                 max_retries=self.budget.max_task_retries,
                 on_call=count_call,
                 parallel=self.parallel,
+                on_event=emit,
             )
 
             # 4. Aggregate finished task outputs.
             aggregated = aggregate(results)
+            emit(EVENT_AGGREGATED, {"preview": _preview(aggregated), "chars": len(aggregated)})
 
             # 5. Run deterministic verification commands, if configured.
             verification = self.verifier.run() if self.verifier else []
             verification_text = summarize_verification(verification)
+            if verification:
+                emit(EVENT_VERIFICATION, {
+                    "results": [
+                        {"name": v.name, "ok": v.ok, "exit_code": v.exit_code}
+                        for v in verification
+                    ]
+                })
 
             # 6. Reviewer agent — quality / consistency / goal-alignment gates.
             review = self._review(state, aggregated, verification_text, count_call)
+            emit(EVENT_REVIEW, {
+                "gates_passed": review.gates_passed,
+                "goal_complete": review.goal_complete,
+                "issues": review.issues,
+            })
 
             state.history.append(
                 IterationTrace(
                     state.iteration, subgoals, results, aggregated, review, verification
                 )
             )
+            emit(EVENT_ITERATION_FINISHED, {
+                "subgoals_ok": sum(r.ok for r in results),
+                "subgoals_total": len(results),
+                "verification_ok": all(v.ok for v in verification),
+                "gates_passed": review.gates_passed,
+                "goal_complete": review.goal_complete,
+            })
             if self.observer:
                 self.observer(state)
 
