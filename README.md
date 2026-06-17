@@ -153,9 +153,14 @@ python3 -m agentloop.mcp_server        # stdio transport
 ```
 
 Tools:
-- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout)`
-  — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`
-- `orchestrate_resume(token, answers)` — continues a run that asked for input
+- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout, detach)`
+  — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`.
+  With `detach=true` it returns `{ status: "running", run_id, … }` immediately (see below).
+- `orchestrate_resume(token, answers, detach)` — continues a run that asked for input
+- `orchestrate_status(run_id)` — light status of a detached run (phase, iteration, running)
+- `orchestrate_tail(run_id, cursor, limit)` — the events a detached run produced since `cursor`
+- `orchestrate_result(run_id, wait, timeout)` — the final result of a detached run
+- `orchestrate_list()` — every detached run this server has started, with status
 - `list_backends()` — the worker engines this server can drive
 - `doctor(cwd?)` — non-invasive diagnostics for backend CLI availability, target
   directory access, and timeout interpretation
@@ -168,6 +173,40 @@ starts and after every iteration (e.g. `iteration 2/4: 3/3 subgoals ok, gates
 pass, goal incomplete`), so the caller sees live status instead of a bare
 spinner.
 When `cwd` is given it runs in an isolated worktree (see above) by default.
+
+**Live visibility — don't go blind until it's done.** A blocking `orchestrate`
+call hides everything until the whole loop returns. Pass `detach=true` to run it
+on a background thread and get a `run_id` back immediately:
+
+```
+orchestrate(goal=…, backend="claude_code", cwd="/repo", detach=true)
+  -> { status: "running", run_id, run_dir, events_path, tail_command }
+orchestrate_tail(run_id, cursor)      -> { events[], cursor, running, more }
+orchestrate_status(run_id)            -> { phase, iteration, running, … }
+orchestrate_result(run_id, wait=true) -> the final result, once done
+```
+
+The calling agent starts the run, then **interleaves polling `orchestrate_tail`
+with talking to you** — so you both see the loop work in real time: each subgoal
+as it's planned, every worker's start/finish and an output preview, the
+verification results, and the reviewer's verdict. Pass the returned `cursor` back
+to `orchestrate_tail` to get only what's new.
+
+Every event is also appended to a durable JSONL log you can **`tail -f` from any
+terminal**, independent of the agent:
+
+```
+<cwd>/.agentloop/runs/<run_id>/
+  events.jsonl     # one event per line — tail -f this
+  status.json      # latest phase / iteration / running
+  result.json      # the final result (written once, at the end)
+  workers/         # full stdout of each worker call: iter<N>_<subgoal>.out
+```
+
+Worker output previews ride inline in the event stream; each worker's *full*
+output is written to `workers/iter<N>_<subgoal>.out` and referenced by
+`data.output_path`. Detached runs also sidestep the MCP request-timeout problem
+entirely: the tool returns at once, so there's no long-blocking call to time out.
 
 Timeouts have three different layers. The MCP host/client has its own request
 timeout; if it reports `-32001 Request timed out`, that often means the host
@@ -305,11 +344,13 @@ invoked with different system prompts — not separate classes.
 
 ```
 agentloop/
-  orchestrator.py   # the loop (deterministic harness)
+  orchestrator.py   # the loop (deterministic harness) — emits live events
   scheduler.py      # parallel/sequential subagent execution + retries
   roles.py          # role prompts — the tunable "skills"
   agent.py          # Agent interface + robust JSON extraction
-  types.py          # Budget, Subgoal, TaskResult, ReviewResult, LoopState, ...
+  types.py          # Budget, Subgoal, TaskResult, ReviewResult, LoopState, LoopEvent, ...
+  runs.py           # detached background runs + the tail-able event log
+  mcp_server.py     # MCP tools: orchestrate(detach), orchestrate_tail/status/result
   adapters/
     mock.py         # deterministic, dependency-free (demo + tests)
     claude.py       # Anthropic SDK backend

@@ -38,6 +38,33 @@ def test_budget_guard_stops_runaway_loop():
     assert "max_iterations" in result.stop_reason
 
 
+def test_emit_streams_fine_grained_events():
+    events: list[tuple] = []
+    orch = Orchestrator(
+        MockAgent(accept_on_iteration=1), budget=Budget(max_iterations=2),
+        emit=lambda kind, iteration, data: events.append((kind, iteration, data)),
+    )
+    result = orch.run("goal", "criteria")
+    assert result.completed
+    kinds = [k for k, _i, _d in events]
+    # Every phase of the iteration is observable, not just the final result.
+    for expected in ("iteration_started", "decomposed", "subagent_started",
+                     "subagent_finished", "review", "iteration_finished"):
+        assert expected in kinds
+    # The worker event carries what the subagent actually produced.
+    finished = next(d for k, _i, d in events if k == "subagent_finished")
+    assert "deliverable produced" in finished["output"]
+
+
+def test_emit_errors_never_break_the_run():
+    def boom(*_args):
+        raise RuntimeError("event sink is down")
+
+    orch = Orchestrator(MockAgent(accept_on_iteration=1),
+                        budget=Budget(max_iterations=2), emit=boom)
+    assert orch.run("goal", "criteria").completed  # survives a broken sink
+
+
 def test_intake_agent_failure_falls_back_and_continues():
     class IntakeFailingAgent:
         def __init__(self):

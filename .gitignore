@@ -9,3 +9,6 @@ venv/
 
 # workspace tooling state
 .context-workspace/
+
+# detached-run event logs / results
+.agentloop/
