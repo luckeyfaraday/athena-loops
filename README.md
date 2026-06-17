@@ -32,7 +32,7 @@ goal ─▶ decompose ─▶ fan-out to subagents ─▶ aggregate ─▶ review
 
 ```bash
 python3 -m examples.run_demo        # zero-dependency MockAgent
-python3 -m pytest                   # 6 tests, no deps
+python3 -m pytest                   # full test suite, no deps
 ```
 
 ```python
@@ -365,13 +365,17 @@ agentloop/
   roles.py          # role prompts — the tunable "skills"
   agent.py          # Agent interface + robust JSON extraction
   types.py          # Budget, Subgoal, TaskResult, ReviewResult, LoopState, LoopEvent, ...
+  interaction.py    # Interaction seam: Auto / Console / Suspend (intake & clarify)
+  verifier.py       # CommandVerifier: real verify-command gate after each iteration
   runs.py           # detached background runs + the tail-able event log
   mcp_server.py     # MCP tools: orchestrate(detach), orchestrate_tail/status/result
+  cli.py            # `agentloop run` / `agentloop backends` entry point
   adapters/
     mock.py         # deterministic, dependency-free (demo + tests)
     claude.py       # Anthropic SDK backend
-examples/run_demo.py
-tests/test_orchestrator.py
+    cli.py          # CliAgent: drive any headless coding-agent CLI as a backend
+examples/run_demo.py, examples/run_with_cli_agent.py
+tests/  # full suite (orchestrator, scheduler, CLI adapter, MCP server, ...)
 ```
 
 ## FAQ
