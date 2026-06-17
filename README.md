@@ -127,33 +127,54 @@ tool, so any MCP-aware agent (Claude Code, Cursor, Codex, opencode, Cline, Winds
 can invoke it. The caller need not be the worker — pick `backend` independently.
 
 ```bash
-pip install -e ".[mcp]"
+pip install -e ".[mcp]"                # installs the `mcp` SDK
 python3 -m agentloop.mcp_server        # stdio transport
 ```
 
-Tools: `orchestrate(goal, success_criteria, backend, cwd, max_iterations,
-skip_permissions, isolate, model)` and `list_backends()`. Result is structured:
+Tools:
+- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model)`
+  — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`
+- `orchestrate_resume(token, answers)` — continues a run that asked for input
+- `list_backends()` — the worker engines this server can drive
+
+A completed result is structured:
 `{ completed, iterations, stop_reason, final_output, history[], worktree? }`.
 When `cwd` is given it runs in an isolated worktree (see above) by default.
 
-Plug into **Claude Code**:
+**Plug into Claude Code.** Point `PYTHONPATH` at the repo so the server resolves
+the package no matter where Claude Code launches it (no install needed):
 
 ```bash
-claude mcp add agentloop -- python3 -m agentloop.mcp_server
+claude mcp add agentloop --scope user \
+  -e PYTHONPATH=/abs/path/to/athena-loops \
+  -- python3 -m agentloop.mcp_server
+
+claude mcp list                        # -> agentloop: ✔ Connected
 ```
 
-Plug into **Cursor / Cline / Windsurf** (`.mcp.json` / `mcp.json`):
+`--scope user` makes it available in every project; use `local` for just this
+one, or `project` to write a shared `.mcp.json`. If you `pip install -e .`
+instead, the `agentloop-mcp` console script is on PATH and the `-e PYTHONPATH=…`
+is unnecessary: `claude mcp add agentloop -- agentloop-mcp`.
+
+**Plug into Cursor / Cline / Windsurf** (`.mcp.json` / `mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "agentloop": { "command": "python3", "args": ["-m", "agentloop.mcp_server"] }
+    "agentloop": {
+      "command": "python3",
+      "args": ["-m", "agentloop.mcp_server"],
+      "env": { "PYTHONPATH": "/abs/path/to/athena-loops" }
+    }
   }
 }
 ```
 
-Then ask the host agent to "use agentloop to orchestrate: <goal>", choosing a
-`backend` (`claude_code`, `codex`, `mock`, …) for the workers.
+Then (restart the session first) ask the host agent to "use agentloop to
+orchestrate: <goal>", choosing a `backend` (`claude_code`, `codex`, `mock`, …)
+for the workers. With `backend=claude_code` the workers spawn nested `claude`
+sub-sessions.
 
 For agents that *don't* speak MCP but can run a shell, there's a plain CLI over
 the same contract:
