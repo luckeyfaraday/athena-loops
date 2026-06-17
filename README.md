@@ -44,6 +44,42 @@ export ANTHROPIC_API_KEY=sk-...
 python3 -m examples.run_demo --claude
 ```
 
+## Plug into any coding agent
+
+The loop is pluggable in two directions, both thin wrappers over the `Agent` seam:
+
+**Inward — coding agents *are* the workers.** `CliAgent` runs each role
+(decomposer / subagent / reviewer) through a headless coding-agent CLI, so the
+workers get that agent's tools, file access, and repo context:
+
+```python
+from agentloop import Orchestrator
+from agentloop.adapters import CliAgent
+
+orch = Orchestrator(CliAgent.claude_code())   # or .codex() / .opencode() / .aider()
+result = orch.run(goal="Add a /health endpoint + test", success_criteria="test passes")
+```
+
+```bash
+python3 -m examples.run_with_cli_agent claude   # codex | opencode | aider
+```
+
+Custom CLI? It's just a command template (`{prompt}`, `{system}`, `{combined}`;
+no prompt placeholder ⇒ text is piped on stdin):
+
+```python
+CliAgent(["my-agent", "--system", "{system}", "--ask", "{prompt}"])
+```
+
+Presets are starting points — CLI flags vary by version; confirm yours and tweak
+`agentloop/adapters/cli.py`. A non-zero exit or timeout becomes a FAILED task
+(with retries), not a silent wrong answer.
+
+**Outward — a coding agent *calls* the loop.** Wrap `Orchestrator.run()` behind a
+stable CLI (`agentloop run --goal … --json`) for universal shell access, or an MCP
+server exposing `orchestrate(goal, criteria, budget)` for native tool integration.
+*(planned — say the word and I'll add them.)*
+
 ## The seam (where to put what)
 
 | Layer | Lives in | What it owns |

@@ -1,6 +1,7 @@
+from .cli import CliAgent
 from .mock import MockAgent
 
-__all__ = ["MockAgent"]
+__all__ = ["MockAgent", "CliAgent", "ClaudeAgent"]
 
 # ClaudeAgent is imported lazily so the package works without the anthropic SDK.
 def __getattr__(name):
