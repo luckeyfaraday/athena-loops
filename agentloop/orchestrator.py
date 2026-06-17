@@ -42,6 +42,8 @@ from .types import (
 )
 from .verifier import CommandVerifier, summarize_verification
 
+DEFAULT_SUCCESS_CRITERIA = "Complete the goal as stated."
+
 # A hook called once per cycle with the live state — for logging / progress UIs.
 Observer = Callable[[LoopState], None]
 # A hook called after each iteration to persist progress (e.g. commit a worktree),
@@ -114,9 +116,12 @@ class Orchestrator:
         """
         criteria = (success_criteria or "").strip()
         if not criteria:
-            proposed = self.agent.run(AgentRequest(
-                role="criteria", system=CRITERIA_SYSTEM, prompt=criteria_prompt(goal),
-            )).text.strip()
+            try:
+                proposed = self.agent.run(AgentRequest(
+                    role="criteria", system=CRITERIA_SYSTEM, prompt=criteria_prompt(goal),
+                )).text.strip()
+            except Exception:  # noqa: BLE001 - criteria drafting is best-effort intake
+                proposed = DEFAULT_SUCCESS_CRITERIA
             if self.interaction.confirm(f"Proposed success criteria:\n  {proposed}\nUse these?"):
                 criteria = proposed
             else:
@@ -145,8 +150,8 @@ class Orchestrator:
             ))
             data = extract_json(resp.text)
             return [str(q) for q in data][: self.max_clarifying_questions]
-        except (ValueError, KeyError, TypeError):
-            return []  # no parseable questions -> nothing to ask, just proceed
+        except Exception:  # noqa: BLE001 - optional intake should not block work
+            return []  # no usable questions -> nothing to ask, just proceed
 
     # --- the loop -----------------------------------------------------------
 
