@@ -15,6 +15,12 @@ it. So the control flow lives in code, and the model-facing judgement (how to
 decompose, the review rubric) lives in swappable prompts. One harness drives any
 backend through a single `Agent` interface.
 
+> ![Peter Steinberger: "You should be designing loops that prompt your agents."](docs/peterloops.png)
+>
+> The tweet that started it all — [Peter Steinberger (@steipete)](https://twitter.com/steipete):
+> *"You shouldn't be prompting coding agents anymore. You should be designing **loops**
+> that prompt your agents."* agentloop is that idea as a reusable harness.
+
 ```
             ┌──────────── harness (this package) ────────────┐
 goal ─▶ decompose ─▶ fan-out to subagents ─▶ aggregate ─▶ review gate ─▶ done?
