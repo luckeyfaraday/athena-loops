@@ -34,14 +34,14 @@ BACKENDS = ["mock", "claude_api", *_CLI_PRESETS]
 
 
 def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
-                 model: Optional[str]):
+                 model: Optional[str], timeout: Optional[float] = None):
     if backend == "mock":
         return MockAgent()
     if backend == "claude_api":
         from .adapters import ClaudeAgent
         return ClaudeAgent(model=model) if model else ClaudeAgent()
     if backend in _CLI_PRESETS:
-        kw: dict[str, Any] = {}
+        kw: dict[str, Any] = {"timeout": timeout}
         if cwd:
             kw["cwd"] = cwd
         if backend != "opencode":  # opencode's run has no skip-permissions flag
@@ -87,13 +87,15 @@ def _run_loop_impl(
     goal: str, criteria: str, clarifications: str, *,
     backend: str, cwd: Optional[str], max_iterations: int, max_task_retries: int,
     skip_permissions: bool, isolate: bool, model: Optional[str],
+    timeout: Optional[float], max_seconds: Optional[float],
     observer: Optional[Callable[[LoopState], None]],
 ) -> dict[str, Any]:
     """Run the loop (intake already done) and return a JSON-serializable result."""
-    budget = Budget(max_iterations=max_iterations, max_task_retries=max_task_retries)
+    budget = Budget(max_iterations=max_iterations, max_task_retries=max_task_retries,
+                    max_seconds=max_seconds)
 
     def run_in(workdir: Optional[str], wt: Optional[Worktree]) -> dict[str, Any]:
-        agent = _build_agent(backend, workdir, skip_permissions, model)
+        agent = _build_agent(backend, workdir, skip_permissions, model, timeout)
         orch = Orchestrator(agent, budget=budget, observer=observer)
         return _result_dict(orch.run_loop(goal, criteria, clarifications), wt)
 
@@ -116,10 +118,16 @@ def orchestrate_impl(
     skip_permissions: bool = False,
     isolate: bool = True,
     model: Optional[str] = None,
+    timeout: Optional[float] = None,
+    max_seconds: Optional[float] = None,
     interaction: Optional[Interaction] = None,
     observer: Optional[Callable[[LoopState], None]] = None,
 ) -> dict[str, Any]:
     """Intake (clarify) then run the loop. No MCP dependency.
+
+    timeout caps each worker CLI call (None = no per-call cap); max_seconds caps
+    the whole run between iterations. Coding workers are slow and unpredictable,
+    so prefer bounding the run with max_seconds over a short per-call timeout.
 
     With the default AutoInteraction this never blocks. Pass a ConsoleInteraction
     for terminal prompts, or a SuspendInteraction to make intake raise NeedInput
@@ -128,7 +136,7 @@ def orchestrate_impl(
     interaction = interaction or AutoInteraction()
     # Intake needs an agent but not a worktree (it only asks/plans, never edits).
     intake_orch = Orchestrator(
-        _build_agent(backend, cwd, skip_permissions, model),
+        _build_agent(backend, cwd, skip_permissions, model, timeout),
         budget=Budget(max_iterations=max_iterations),
         interaction=interaction,
     )
@@ -136,7 +144,8 @@ def orchestrate_impl(
     return _run_loop_impl(
         goal, criteria, clarifications, backend=backend, cwd=cwd,
         max_iterations=max_iterations, max_task_retries=max_task_retries,
-        skip_permissions=skip_permissions, isolate=isolate, model=model, observer=observer,
+        skip_permissions=skip_permissions, isolate=isolate, model=model,
+        timeout=timeout, max_seconds=max_seconds, observer=observer,
     )
 
 
@@ -192,6 +201,7 @@ def orchestrate_resume_impl(
         max_task_retries=data.get("max_task_retries", 1),
         skip_permissions=data.get("skip_permissions", False),
         isolate=data.get("isolate", True), model=data.get("model"),
+        timeout=data.get("timeout"), max_seconds=data.get("max_seconds"),
     )
 
 
@@ -211,6 +221,8 @@ def build_server():
         skip_permissions: bool = False,
         isolate: bool = True,
         model: Optional[str] = None,
+        timeout: Optional[float] = None,
+        max_seconds: Optional[float] = None,
     ) -> dict[str, Any]:
         """Run an orchestrator -> worker -> reviewer loop until the success
         criteria are met (or a budget guard trips), and return the result.
@@ -236,6 +248,10 @@ def build_server():
             isolate: When `cwd` is set, run in a throwaway git worktree/branch so
                 the caller's checkout is untouched (recommended).
             model: Optional model override for claude_code / claude_api.
+            timeout: Seconds to cap EACH worker CLI call. None (default) = no
+                per-call cap. Real coding workers are slow; don't set this low.
+            max_seconds: Wall-clock cap on the WHOLE run, checked between
+                iterations. Prefer this over `timeout` to bound a long build.
 
         Returns:
             Either { status: "needs_input", questions[], token } or
@@ -245,7 +261,7 @@ def build_server():
         return orchestrate_suspendable(
             goal, success_criteria, backend=backend, cwd=cwd,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
-            isolate=isolate, model=model,
+            isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
         )
 
     @mcp.tool()

@@ -65,6 +65,19 @@ def test_timeout_raises():
         agent.run(_req())
 
 
+def test_default_has_no_per_call_timeout():
+    # Coding workers are slow; the default must not cap them at some short value.
+    assert CliAgent([sys.executable, "-c", "pass"]).timeout is None
+    assert CliAgent.claude_code().timeout is None
+
+
+def test_timeout_flows_through_build_agent():
+    from agentloop.mcp_server import _build_agent
+    agent = _build_agent("claude_code", cwd=None, skip_permissions=False,
+                         model=None, timeout=600.0)
+    assert agent.timeout == 600.0
+
+
 def test_cwd_is_honored():
     import tempfile
     d = tempfile.mkdtemp()

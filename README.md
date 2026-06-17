@@ -74,12 +74,20 @@ orch = Orchestrator(agent)                     # or .codex() / .opencode() / .ai
 result = orch.run(goal="Add a /health endpoint + test", success_criteria="test passes")
 ```
 
-Two knobs for autonomous coding workers:
+Knobs for autonomous coding workers:
 - `cwd=...` — run the worker inside a specific repo (works for every preset).
 - `skip_permissions=True` — let the worker use tools without prompting
   (`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox` /
   `--yes-always`). Needed for headless coding, but it bypasses all safety prompts —
   point it at a worktree or throwaway branch, not your main checkout.
+- `timeout=...` — seconds to cap **each** worker CLI call. **Default is `None`
+  (no cap)**: a real coding worker is slow and unpredictable, so a short per-call
+  timeout just kills it mid-task and throws the work away. Bound the *run* instead
+  with `Budget(max_seconds=...)`, which is checked between iterations.
+
+For big builds, keep subgoals small (the worker has to finish one in a single
+call) and give the loop room with `max_iterations`; one cold worker can't build
+everything in one shot.
 
 Auth piggybacks on the CLI's own login, so a Claude.ai / ChatGPT **subscription
 OAuth** session works with no API key.

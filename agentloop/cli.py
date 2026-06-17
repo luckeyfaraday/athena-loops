@@ -104,7 +104,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     common = dict(
         backend=args.backend, cwd=args.cwd, max_iterations=args.max_iterations,
         skip_permissions=args.skip_permissions, isolate=not args.no_isolate,
-        model=args.model, observer=observer,
+        model=args.model, timeout=args.timeout, max_seconds=args.max_seconds,
+        observer=observer,
     )
 
     if args.ask:
@@ -144,6 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--cwd", help="repo to work in (coding tasks that edit files)")
     r.add_argument("--max-iterations", type=int, default=4,
                    help="cap on decompose->review cycles (termination guard)")
+    r.add_argument("--timeout", type=float, default=None,
+                   help="seconds to cap EACH worker CLI call (default: no cap)")
+    r.add_argument("--max-seconds", type=float, default=None,
+                   help="wall-clock cap on the whole run (checked between iterations)")
     r.add_argument("--skip-permissions", action="store_true",
                    help="let CLI workers use tools without prompting (needs --cwd)")
     r.add_argument("--no-isolate", action="store_true",

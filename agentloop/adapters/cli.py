@@ -33,10 +33,13 @@ class CliAgent(Agent):
         command: Sequence[str],
         *,
         parse_output: Optional[Callable[[str], str]] = None,
-        timeout: Optional[float] = 300.0,
+        timeout: Optional[float] = None,
         cwd: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
     ):
+        # timeout=None means no per-worker cap: a coding agent's runtime is
+        # unpredictable, so the right global guard is Budget.max_seconds on the
+        # whole run, not an arbitrary per-call limit. Set a number to cap a call.
         self.command = list(command)
         self.parse_output = parse_output
         self.timeout = timeout
@@ -66,7 +69,13 @@ class CliAgent(Agent):
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"CLI agent timed out after {self.timeout}s: {argv[0]}") from exc
+            partial = (exc.stdout or "")
+            if isinstance(partial, bytes):
+                partial = partial.decode(errors="replace")
+            hint = f" (partial output: {partial.strip()[:200]!r})" if partial.strip() else ""
+            raise RuntimeError(
+                f"CLI agent timed out after {self.timeout}s: {argv[0]}{hint}"
+            ) from exc
 
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()[:500]
