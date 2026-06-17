@@ -52,6 +52,17 @@ def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
     raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
 
 
+def _summary(out: dict[str, Any]) -> str:
+    """One human-readable line summarizing a finished run (for the tool result)."""
+    verb = "completed" if out["completed"] else "stopped"
+    parts = [f"{verb} in {out['iterations']} iteration(s)", f"reason: {out['stop_reason']}"]
+    wt = out.get("worktree")
+    if wt:
+        n = len(wt["changed_files"])
+        parts.append(f"worktree {wt['branch']} ({n} file{'' if n == 1 else 's'} changed)")
+    return " · ".join(parts)
+
+
 def _result_dict(result: LoopResult, wt: Optional[Worktree]) -> dict[str, Any]:
     out: dict[str, Any] = {
         "completed": result.completed,
@@ -80,6 +91,7 @@ def _result_dict(result: LoopResult, wt: Optional[Worktree]) -> dict[str, Any]:
             "branch": wt.branch,
             "changed_files": wt.changed_files(),
         }
+    out["summary"] = _summary(out)
     return out
 
 
@@ -205,14 +217,69 @@ def orchestrate_resume_impl(
     )
 
 
+# --- live progress (so the MCP client shows more than a spinner) -------------
+
+def _progress_observer(report: Callable[[int, int, str], None]) -> Callable[[LoopState], None]:
+    """Adapt a `report(progress, total, message)` callback into a LoopState observer.
+
+    Fires once per completed iteration with a human-readable status line — what
+    the calling agent surfaces under its tool-call spinner.
+    """
+    def observer(state: LoopState) -> None:
+        t = state.history[-1]
+        ok = sum(r.ok for r in t.results)
+        total = state.budget.max_iterations
+        report(
+            t.iteration, total,
+            f"iteration {t.iteration}/{total}: {ok}/{len(t.results)} subgoals ok, "
+            f"gates {'pass' if t.review.gates_passed else 'fail'}, "
+            f"goal {'complete' if t.review.goal_complete else 'incomplete'}",
+        )
+    return observer
+
+
+async def _run_with_progress(ctx, thunk: Callable[[Optional[Callable]], dict[str, Any]]):
+    """Run a blocking `thunk(observer)` off the event loop, relaying each
+    iteration to the MCP client via `ctx.report_progress`.
+
+    The loop is synchronous and slow, so it runs in a worker thread; the observer
+    bridges back to the event loop to emit `notifications/progress`. `ctx` may be
+    None (e.g. a client that injects no context) — then it just runs, no progress.
+    """
+    import anyio
+
+    if ctx is None:
+        return await anyio.to_thread.run_sync(lambda: thunk(None))
+
+    async def _emit(progress: int, total: int, message: str) -> None:
+        try:
+            await ctx.report_progress(progress=progress, total=total, message=message)
+        except Exception:
+            pass  # progress is best-effort; never fail a run over a notification
+
+    def report(progress: int, total: int, message: str) -> None:
+        anyio.from_thread.run(_emit, progress, total, message)
+
+    return await anyio.to_thread.run_sync(lambda: thunk(_progress_observer(report)))
+
+
 def build_server():
     """Construct the FastMCP server. Imports the MCP SDK lazily."""
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("agentloop")
 
+    def _ctx():
+        # The live request's Context (for progress notifications), or None if we
+        # somehow run outside a request. Kept out of the tool signature so it
+        # never shows up in the tool's input schema.
+        try:
+            return mcp.get_context()
+        except Exception:
+            return None
+
     @mcp.tool()
-    def orchestrate(
+    async def orchestrate(
         goal: str,
         success_criteria: str = "",
         backend: str = "claude_code",
@@ -253,28 +320,35 @@ def build_server():
             max_seconds: Wall-clock cap on the WHOLE run, checked between
                 iterations. Prefer this over `timeout` to bound a long build.
 
+        Streams a `notifications/progress` update per iteration as it runs, so the
+        calling agent can show live status instead of a bare spinner.
+
         Returns:
             Either { status: "needs_input", questions[], token } or
-            { completed, iterations, stop_reason, final_output, history[],
-              worktree?{ path, branch, changed_files } }
+            { completed, iterations, stop_reason, final_output, summary,
+              history[], worktree?{ path, branch, changed_files } }
         """
-        return orchestrate_suspendable(
+        return await _run_with_progress(_ctx(), lambda observer: orchestrate_suspendable(
             goal, success_criteria, backend=backend, cwd=cwd,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
-        )
+            observer=observer,
+        ))
 
     @mcp.tool()
-    def orchestrate_resume(token: str, answers: list[str]) -> dict[str, Any]:
+    async def orchestrate_resume(token: str, answers: list[str]) -> dict[str, Any]:
         """Resume a run that returned `needs_input`.
 
         Args:
             token: The opaque token from the `needs_input` response.
             answers: One answer per question, in the order they were asked.
 
-        Returns: the same result shape as a completed `orchestrate` call.
+        Returns: the same result shape as a completed `orchestrate` call (and
+        streams per-iteration progress the same way).
         """
-        return orchestrate_resume_impl(token, answers)
+        return await _run_with_progress(
+            _ctx(), lambda observer: orchestrate_resume_impl(token, answers, observer=observer)
+        )
 
     @mcp.tool()
     def list_backends() -> dict[str, Any]:
