@@ -110,10 +110,38 @@ Presets are starting points — CLI flags vary by version; confirm yours and twe
 `agentloop/adapters/cli.py`. A non-zero exit or timeout becomes a FAILED task
 (with retries), not a silent wrong answer.
 
-**Outward — a coding agent *calls* the loop.** Wrap `Orchestrator.run()` behind a
-stable CLI (`agentloop run --goal … --json`) for universal shell access, or an MCP
-server exposing `orchestrate(goal, criteria, budget)` for native tool integration.
-*(planned — say the word and I'll add them.)*
+**Outward — a coding agent *calls* the loop.** An MCP server exposes the loop as a
+tool, so any MCP-aware agent (Claude Code, Cursor, Codex, opencode, Cline, Windsurf)
+can invoke it. The caller need not be the worker — pick `backend` independently.
+
+```bash
+pip install -e ".[mcp]"
+python3 -m agentloop.mcp_server        # stdio transport
+```
+
+Tools: `orchestrate(goal, success_criteria, backend, cwd, max_iterations,
+skip_permissions, isolate, model)` and `list_backends()`. Result is structured:
+`{ completed, iterations, stop_reason, final_output, history[], worktree? }`.
+When `cwd` is given it runs in an isolated worktree (see above) by default.
+
+Plug into **Claude Code**:
+
+```bash
+claude mcp add agentloop -- python3 -m agentloop.mcp_server
+```
+
+Plug into **Cursor / Cline / Windsurf** (`.mcp.json` / `mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "agentloop": { "command": "python3", "args": ["-m", "agentloop.mcp_server"] }
+  }
+}
+```
+
+Then ask the host agent to "use agentloop to orchestrate: <goal>", choosing a
+`backend` (`claude_code`, `codex`, `mock`, …) for the workers.
 
 ## The seam (where to put what)
 

@@ -11,7 +11,11 @@ dependencies = []  # core harness has zero runtime deps
 
 [project.optional-dependencies]
 claude = ["anthropic>=0.40"]
+mcp = ["mcp>=1.0"]
 dev = ["pytest>=8"]
+
+[project.scripts]
+agentloop-mcp = "agentloop.mcp_server:main"
 
 [tool.setuptools]
 packages = ["agentloop", "agentloop.adapters"]
