@@ -157,40 +157,56 @@ Tools:
   — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`
 - `orchestrate_resume(token, answers)` — continues a run that asked for input
 - `list_backends()` — the worker engines this server can drive
+- `doctor(cwd?)` — non-invasive diagnostics for backend CLI availability, target
+  directory access, and timeout interpretation
 
 A completed result is structured:
 `{ completed, iterations, stop_reason, final_output, summary, history[], worktree? }`
 — `summary` is a one-line human-readable digest for the calling agent to show.
-While it runs, `orchestrate` streams a `notifications/progress` update per
-iteration (e.g. `iteration 2/4: 3/3 subgoals ok, gates pass, goal incomplete`),
-so the caller sees live status instead of a bare spinner.
+While it runs, `orchestrate` streams a `notifications/progress` update when it
+starts and after every iteration (e.g. `iteration 2/4: 3/3 subgoals ok, gates
+pass, goal incomplete`), so the caller sees live status instead of a bare
+spinner.
 When `cwd` is given it runs in an isolated worktree (see above) by default.
+
+Timeouts have three different layers. The MCP host/client has its own request
+timeout; if it reports `-32001 Request timed out`, that often means the host
+stopped waiting before `orchestrate` returned, not that a backend failed to
+spawn. Configure long-running MCP hosts to wait at least `600000` ms. Separately,
+`orchestrate(timeout=...)` is a hard cap for each CLI worker subprocess, while
+`max_seconds` is a cooperative loop budget checked between phases/iterations and
+does not interrupt one blocked subprocess. Have agents call `doctor()` before
+guessing about missing CLIs or broken backend spawning.
 
 **Plug into Claude Code.** Point `PYTHONPATH` at the repo so the server resolves
 the package no matter where Claude Code launches it (no install needed):
 
 ```bash
-claude mcp add agentloop --scope user \
+claude mcp add athena-loops --scope user \
   -e PYTHONPATH=/abs/path/to/athena-loops \
   -- python3 -m agentloop.mcp_server
 
-claude mcp list                        # -> agentloop: ✔ Connected
+claude mcp list                        # -> athena-loops: ✔ Connected
 ```
+
+Claude Code's CLI registration does not expose a per-server request-timeout flag;
+use `doctor()` to distinguish host timeout symptoms from backend availability.
 
 `--scope user` makes it available in every project; use `local` for just this
 one, or `project` to write a shared `.mcp.json`. If you `pip install -e .`
 instead, the `agentloop-mcp` console script is on PATH and the `-e PYTHONPATH=…`
-is unnecessary: `claude mcp add agentloop -- agentloop-mcp`.
+is unnecessary: `claude mcp add athena-loops -- agentloop-mcp`.
 
 **Plug into Cursor / Cline / Windsurf** (`.mcp.json` / `mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "agentloop": {
+    "athena-loops": {
       "command": "python3",
       "args": ["-m", "agentloop.mcp_server"],
-      "env": { "PYTHONPATH": "/abs/path/to/athena-loops" }
+      "env": { "PYTHONPATH": "/abs/path/to/athena-loops" },
+      "timeout": 600000
     }
   }
 }

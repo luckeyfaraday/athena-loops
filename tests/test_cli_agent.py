@@ -40,6 +40,20 @@ def test_arg_substitution_passes_prompt_as_argument():
     assert agent.run(_req(prompt="ship it")).text == "ship it"
 
 
+def test_arg_mode_detaches_child_stdin(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return __import__("subprocess").CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("agentloop.adapters.cli.subprocess.run", fake_run)
+    agent = CliAgent([sys.executable, "-c", "print('ok')", "{prompt}"])
+    assert agent.run(_req(prompt="ship it")).text == "ok"
+    assert seen["stdin"] is __import__("subprocess").DEVNULL
+    assert "input" not in seen
+
+
 def test_stdin_mode_when_no_placeholder_sends_combined():
     # No {prompt}/{combined} in the template -> text goes to stdin.
     agent = CliAgent([sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"])
