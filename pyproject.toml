@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentloop"
+version = "0.1.0"
+description = "Backend-agnostic implementation of the AI Agent Orchestration Loop (orchestrator-worker-reviewer)."
+requires-python = ">=3.10"
+dependencies = []  # core harness has zero runtime deps
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40"]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["agentloop", "agentloop.adapters"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
