@@ -143,6 +143,20 @@ Plug into **Cursor / Cline / Windsurf** (`.mcp.json` / `mcp.json`):
 Then ask the host agent to "use agentloop to orchestrate: <goal>", choosing a
 `backend` (`claude_code`, `codex`, `mock`, …) for the workers.
 
+For agents that *don't* speak MCP but can run a shell, there's a plain CLI over
+the same contract:
+
+```bash
+agentloop run --goal "Add a /health endpoint + test" --criteria "test passes" \
+  --backend claude_code --cwd . --skip-permissions --json
+agentloop backends
+```
+
+`--json` prints the full result on stdout; `--progress` streams one NDJSON line
+per iteration on stderr; `--goal -` / `--goal-file` read long prompts. Exit code
+is `0` if completed, `1` if a budget guard stopped it, `2` on error — so scripts
+and agents can branch on the outcome.
+
 ## The seam (where to put what)
 
 | Layer | Lives in | What it owns |
