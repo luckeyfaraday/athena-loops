@@ -5,6 +5,7 @@ These use a tiny Python stub as the "CLI" so no real agent needs to be installed
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -53,6 +54,15 @@ def test_parse_output_extracts_from_json_envelope():
     assert agent.run(_req()).text == "inner text"
 
 
+def test_claude_code_json_error_raises():
+    agent = CliAgent.claude_code()
+    out = json.dumps({"is_error": True, "api_error_status": 429,
+                      "result": "session limit"})
+    assert agent.parse_output is not None
+    with pytest.raises(RuntimeError, match="Claude Code reported an error.*429"):
+        agent.parse_output(out)
+
+
 def test_nonzero_exit_raises():
     agent = CliAgent([sys.executable, "-c", "import sys; sys.exit(3)"])
     with pytest.raises(RuntimeError, match="exited 3"):
@@ -89,7 +99,16 @@ def test_skip_permissions_adds_bypass_flag():
     assert "--dangerously-skip-permissions" in CliAgent.claude_code(skip_permissions=True).command
     assert "--dangerously-skip-permissions" not in CliAgent.claude_code().command
     assert "--dangerously-bypass-approvals-and-sandbox" in CliAgent.codex(skip_permissions=True).command
+    assert "--dangerously-skip-permissions" in CliAgent.opencode(skip_permissions=True).command
+    assert "--dangerously-skip-permissions" not in CliAgent.opencode().command
     assert "--yes-always" in CliAgent.aider(skip_permissions=True).command
+
+
+def test_build_agent_passes_skip_permissions_to_opencode():
+    from agentloop.mcp_server import _build_agent
+    agent = _build_agent("opencode", cwd=None, skip_permissions=True,
+                         model=None, timeout=None)
+    assert "--dangerously-skip-permissions" in agent.command
 
 
 def test_cwd_forwards_through_presets():
