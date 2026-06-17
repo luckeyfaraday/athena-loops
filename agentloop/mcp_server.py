@@ -94,7 +94,10 @@ def _backend_status(name: str) -> dict[str, Any]:
         "path": path,
     }
     if path:
-        status["version"] = _run_version([executable, "--version"])
+        # Use the resolved path, not the bare name: on Windows subprocess
+        # (shell=False) won't apply PATHEXT, so spawning bare "claude" would
+        # OSError and falsely report the present CLI's version probe as failed.
+        status["version"] = _run_version([path, "--version"])
     else:
         status["error"] = f"{executable!r} not found on PATH"
     return status
