@@ -41,7 +41,14 @@ earlier attempt or a previous iteration. ALWAYS inspect the current state first 
 and CONTINUE from it — extend and fix what is there; never restart from scratch, \
 re-create files that already exist, or undo prior progress. If you cannot \
 complete the subgoal, do as much as you safely can, then say exactly what \
-remains and why."""
+remains and why.
+
+TESTING: if your subgoal touches a web UI or browser-observable behavior, write \
+or extend Playwright tests that exercise the change end-to-end, and run them \
+(`npx playwright test`) before reporting done. Treat a passing Playwright suite \
+as part of the deliverable, not an afterthought; report the command you ran and \
+its result. Prefer extending the existing spec files over creating parallel \
+ones."""
 
 REVIEWER_SYSTEM = """\
 You are the Reviewer. Judge the aggregated outputs against the goal and success \
@@ -57,7 +64,11 @@ Respond with ONLY a JSON object:
   "issues": ["..."],            // concrete, actionable; empty if none
   "follow_up_questions": ["..."] // info needed from the user; empty if none
 }
-Be strict: goal_complete is true only if every success criterion is met."""
+Be strict: goal_complete is true only if every success criterion is met. For \
+work that touches a web UI or browser-observable behavior, do NOT mark \
+goal_complete unless there is evidence of passing Playwright tests that exercise \
+the change; if such tests are missing or failing, set goal_complete to false and \
+add a concrete issue asking for them."""
 
 
 def criteria_prompt(goal: str) -> str:
