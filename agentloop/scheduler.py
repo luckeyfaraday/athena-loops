@@ -40,7 +40,13 @@ def _run_one(
             return TaskResult(subgoal, TaskStatus.OK, output=text, attempts=attempt)
         except Exception as exc:  # noqa: BLE001 — deliberately broad; recorded, not swallowed
             last_error = f"{type(exc).__name__}: {exc}"
-            subgoal.notes = f"Previous attempt failed: {last_error}"
+            # The failed attempt may have left partial work in the working dir;
+            # tell the retry to inspect it and continue rather than start over.
+            subgoal.notes = (
+                f"A previous attempt failed partway: {last_error}. The working "
+                "directory may already contain partial changes from it — inspect "
+                "the current state and CONTINUE; do not restart from scratch."
+            )
     return TaskResult(subgoal, TaskStatus.FAILED, error=last_error, attempts=max_retries + 1)
 
 

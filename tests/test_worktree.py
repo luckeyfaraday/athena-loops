@@ -75,6 +75,34 @@ def test_cleanup_always_removes_even_when_changed():
     assert not os.path.exists(path)
 
 
+def test_checkpoints_preserve_partial_work_across_iterations():
+    # A run that never "completes" must still keep each iteration's work, as a
+    # commit on the branch — not lose it because the loop stopped on a guard.
+    from agentloop import Budget, Orchestrator
+    from agentloop.adapters import MockAgent
+
+    repo = _make_repo()
+    with worktree(repo, cleanup="never") as wt:
+        n = {"i": 0}
+
+        def writer(_req):  # a file-editing worker: extends out.txt each call
+            n["i"] += 1
+            with open(os.path.join(wt.path, "out.txt"), "a") as f:
+                f.write(f"line {n['i']}\n")
+            return "did work"
+
+        agent = MockAgent(subgoals=["build it"], subagent_fn=writer,
+                          accept_on_iteration=99)  # reviewer never accepts
+        orch = Orchestrator(agent, budget=Budget(max_iterations=3),
+                            checkpoint=lambda st: wt.commit(f"iteration {st.iteration}"))
+        result = orch.run("goal", "criteria")
+
+        assert not result.completed          # stopped on the iteration guard
+        assert len(wt.commits()) == 3        # ...but every iteration was checkpointed
+        assert os.path.exists(os.path.join(wt.path, "out.txt"))
+        wt.remove()
+
+
 def test_non_git_dir_raises():
     d = tempfile.mkdtemp()
     with pytest.raises(RuntimeError, match="not a git repository"):

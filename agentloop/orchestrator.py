@@ -37,6 +37,9 @@ from .types import (
 
 # A hook called once per cycle with the live state — for logging / progress UIs.
 Observer = Callable[[LoopState], None]
+# A hook called after each iteration to persist progress (e.g. commit a worktree),
+# so partial work is never lost if the run later fails or is stopped.
+Checkpoint = Callable[[LoopState], None]
 
 
 class Orchestrator:
@@ -47,6 +50,7 @@ class Orchestrator:
         budget: Optional[Budget] = None,
         parallel: bool = True,
         observer: Optional[Observer] = None,
+        checkpoint: Optional[Checkpoint] = None,
         interaction: Optional[Interaction] = None,
         max_clarifying_questions: int = 4,
     ):
@@ -54,6 +58,8 @@ class Orchestrator:
         self.budget = budget or Budget()
         self.parallel = parallel
         self.observer = observer
+        # Called after each iteration to persist partial work (worktree commit).
+        self.checkpoint = checkpoint
         # How the loop reaches the human. Default headless so existing callers
         # never block; pass ConsoleInteraction/SuspendInteraction for real UX.
         self.interaction = interaction or AutoInteraction()
@@ -155,6 +161,15 @@ class Orchestrator:
             )
             if self.observer:
                 self.observer(state)
+
+            # Persist this iteration's work before deciding/looping, so partial
+            # progress survives a later failure or a budget stop. Never let a
+            # checkpoint error break the run.
+            if self.checkpoint:
+                try:
+                    self.checkpoint(state)
+                except Exception:  # noqa: BLE001 — checkpointing is best-effort
+                    pass
 
             # 6 & 7. Goal completed? YES -> deliver. NO -> refine and loop.
             all_ok = all(r.ok for r in results)

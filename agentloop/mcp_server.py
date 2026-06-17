@@ -90,6 +90,7 @@ def _result_dict(result: LoopResult, wt: Optional[Worktree]) -> dict[str, Any]:
             "path": wt.path,
             "branch": wt.branch,
             "changed_files": wt.changed_files(),
+            "checkpoints": wt.commits(),  # per-iteration commits; work survives a failure
         }
     out["summary"] = _summary(out)
     return out
@@ -108,7 +109,13 @@ def _run_loop_impl(
 
     def run_in(workdir: Optional[str], wt: Optional[Worktree]) -> dict[str, Any]:
         agent = _build_agent(backend, workdir, skip_permissions, model, timeout)
-        orch = Orchestrator(agent, budget=budget, observer=observer)
+        # In a worktree, commit after each iteration so partial work is durable
+        # even if a later iteration fails or a budget guard stops the run.
+        checkpoint = None
+        if wt is not None:
+            checkpoint = lambda st: wt.commit(  # noqa: E731
+                f"agentloop: iteration {st.iteration}")
+        orch = Orchestrator(agent, budget=budget, observer=observer, checkpoint=checkpoint)
         return _result_dict(orch.run_loop(goal, criteria, clarifications), wt)
 
     # A repo + isolation -> run inside a throwaway worktree so workers never touch

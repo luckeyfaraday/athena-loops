@@ -67,6 +67,11 @@ class Worktree:
     def diff(self) -> str:
         return _git(self.path, "diff", self.base_sha)
 
+    def commits(self) -> list[str]:
+        """Checkpoint commits made on this branch since it was created (newest first)."""
+        out = _git(self.path, "log", "--oneline", f"{self.base_sha}..HEAD")
+        return out.splitlines() if out else []
+
     # --- actions ------------------------------------------------------------
 
     def commit(self, message: str) -> Optional[str]:
