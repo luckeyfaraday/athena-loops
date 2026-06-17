@@ -56,9 +56,21 @@ workers get that agent's tools, file access, and repo context:
 from agentloop import Orchestrator
 from agentloop.adapters import CliAgent
 
-orch = Orchestrator(CliAgent.claude_code())   # or .codex() / .opencode() / .aider()
+# Point the worker at a repo and let it actually edit files headlessly:
+agent = CliAgent.claude_code(cwd="/path/to/repo", skip_permissions=True)
+orch = Orchestrator(agent)                     # or .codex() / .opencode() / .aider()
 result = orch.run(goal="Add a /health endpoint + test", success_criteria="test passes")
 ```
+
+Two knobs for autonomous coding workers:
+- `cwd=...` — run the worker inside a specific repo (works for every preset).
+- `skip_permissions=True` — let the worker use tools without prompting
+  (`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox` /
+  `--yes-always`). Needed for headless coding, but it bypasses all safety prompts —
+  point it at a worktree or throwaway branch, not your main checkout.
+
+Auth piggybacks on the CLI's own login, so a Claude.ai / ChatGPT **subscription
+OAuth** session works with no API key.
 
 ```bash
 python3 -m examples.run_with_cli_agent claude   # codex | opencode | aider

@@ -3,9 +3,13 @@
 The loop's decomposer/subagents/reviewer are executed by whatever coding-agent
 CLI you point it at — so the workers get that agent's tools and repo access.
 
-    python3 -m examples.run_with_cli_agent claude
-    python3 -m examples.run_with_cli_agent codex
+    python3 -m examples.run_with_cli_agent claude  [REPO_DIR]
+    python3 -m examples.run_with_cli_agent codex   [REPO_DIR]
     python3 -m examples.run_with_cli_agent opencode
+
+Pass REPO_DIR to run the worker against a real repo with permissions skipped
+(it WILL edit files there — use a worktree/throwaway branch). With no REPO_DIR it
+runs read-only-ish with prompts left on.
 
 Note: presets are starting templates; confirm your CLI's flags and adjust
 agentloop/adapters/cli.py if a call errors. Requires the chosen agent installed.
@@ -28,10 +32,17 @@ BUILDERS = {
 
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "claude"
+    repo = sys.argv[2] if len(sys.argv) > 2 else None
     if which not in BUILDERS:
         sys.exit(f"unknown agent {which!r}; choose from {list(BUILDERS)}")
 
-    agent = BUILDERS[which]()  # e.g. CliAgent.claude_code()
+    # Skip permissions only when pointed at an explicit repo to edit.
+    kw = {}
+    if repo:
+        kw["cwd"] = repo
+        if which != "opencode":  # opencode's run has no skip-permissions flag
+            kw["skip_permissions"] = True
+    agent = BUILDERS[which](**kw)  # e.g. CliAgent.claude_code(cwd=..., skip_permissions=True)
     orch = Orchestrator(agent, budget=Budget(max_iterations=3))
     result = orch.run(
         goal="Add a /health endpoint that returns {status: ok} and a test for it.",

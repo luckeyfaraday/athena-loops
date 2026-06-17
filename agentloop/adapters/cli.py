@@ -85,24 +85,42 @@ class CliAgent(Agent):
     # --- presets -----------------------------------------------------------
     # Starting templates for common coding agents. CLI flags change between
     # versions — confirm against your installed agent and adjust as needed.
+    #
+    # Two knobs matter for autonomous coding workers:
+    #   cwd=...            -> run the worker in a specific repo (forwarded to __init__;
+    #                         subprocess cwd is the working dir for every preset).
+    #   skip_permissions=True -> let the worker use tools without prompting. Headless
+    #                         coding runs need this, but it bypasses ALL safety
+    #                         prompts/sandboxing — only use against a repo you intend
+    #                         the agent to edit (ideally a worktree/branch).
 
     @classmethod
-    def claude_code(cls, *, model: Optional[str] = None, **kw) -> "CliAgent":
+    def claude_code(
+        cls, *, model: Optional[str] = None, skip_permissions: bool = False, **kw
+    ) -> "CliAgent":
         cmd = ["claude", "-p", "{prompt}", "--append-system-prompt", "{system}",
                "--output-format", "json"]
         if model:
             cmd += ["--model", model]
+        if skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
         # `--output-format json` wraps the reply in an envelope; pull out `.result`.
         return cls(cmd, parse_output=lambda out: json.loads(out)["result"], **kw)
 
     @classmethod
-    def codex(cls, **kw) -> "CliAgent":
-        return cls(["codex", "exec", "{combined}"], **kw)
+    def codex(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
+        cmd = ["codex", "exec"]
+        if skip_permissions:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        cmd.append("{combined}")
+        return cls(cmd, **kw)
 
     @classmethod
     def opencode(cls, **kw) -> "CliAgent":
         return cls(["opencode", "run", "{combined}"], **kw)
 
     @classmethod
-    def aider(cls, **kw) -> "CliAgent":
-        return cls(["aider", "--message", "{combined}", "--yes", "--no-auto-commits"], **kw)
+    def aider(cls, *, skip_permissions: bool = False, **kw) -> "CliAgent":
+        cmd = ["aider", "--message", "{combined}", "--no-auto-commits"]
+        cmd.append("--yes-always" if skip_permissions else "--yes")
+        return cls(cmd, **kw)

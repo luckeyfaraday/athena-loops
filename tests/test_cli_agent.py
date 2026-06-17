@@ -5,6 +5,7 @@ These use a tiny Python stub as the "CLI" so no real agent needs to be installed
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -62,6 +63,25 @@ def test_timeout_raises():
     agent = CliAgent([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3)
     with pytest.raises(RuntimeError, match="timed out"):
         agent.run(_req())
+
+
+def test_cwd_is_honored():
+    import tempfile
+    d = tempfile.mkdtemp()
+    agent = CliAgent([sys.executable, "-c", "import os; print(os.getcwd())"], cwd=d)
+    assert os.path.realpath(agent.run(_req()).text) == os.path.realpath(d)
+
+
+def test_skip_permissions_adds_bypass_flag():
+    assert "--dangerously-skip-permissions" in CliAgent.claude_code(skip_permissions=True).command
+    assert "--dangerously-skip-permissions" not in CliAgent.claude_code().command
+    assert "--dangerously-bypass-approvals-and-sandbox" in CliAgent.codex(skip_permissions=True).command
+    assert "--yes-always" in CliAgent.aider(skip_permissions=True).command
+
+
+def test_cwd_forwards_through_presets():
+    agent = CliAgent.claude_code(cwd="/tmp/repo", skip_permissions=True)
+    assert agent.cwd == "/tmp/repo"
 
 
 def test_cli_agent_drives_the_full_loop():
