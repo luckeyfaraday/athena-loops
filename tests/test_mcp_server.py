@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -27,7 +29,6 @@ def test_orchestrate_impl_mock_completes():
     assert out["final_output"]
     assert isinstance(out["history"], list) and out["history"]
     # The result must be JSON-serializable (it goes over the wire).
-    import json
     json.dumps(out)
 
 
@@ -79,8 +80,18 @@ def test_run_with_progress_tolerates_no_context():
 def test_orchestrate_impl_reports_history_shape():
     out = orchestrate_impl("g", "c", backend="mock", max_iterations=2)
     h0 = out["history"][0]
-    assert set(h0) == {"iteration", "subgoals", "results", "review"}
+    assert set(h0) == {"iteration", "subgoals", "results", "review", "verification"}
     assert set(h0["review"]) == {"gates_passed", "goal_complete", "issues"}
+
+
+def test_orchestrate_impl_runs_verification_commands():
+    out = orchestrate_impl(
+        "g", "c", backend="mock", max_iterations=2,
+        verify_commands=[f"{sys.executable} -c 'print(123)'"],
+    )
+    verification = out["history"][0]["verification"]
+    assert verification[0]["ok"] is True
+    assert verification[0]["stdout"].strip() == "123"
 
 
 def test_unknown_backend_raises():

@@ -67,6 +67,28 @@ class ReviewResult:
 
 
 @dataclass
+class VerifyCommand:
+    """One deterministic command the harness runs to verify an iteration."""
+
+    name: str
+    command: list[str]
+    timeout: Optional[float] = None
+
+
+@dataclass
+class VerifyResult:
+    """Captured result of a verification command."""
+
+    name: str
+    ok: bool
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: Optional[int] = None
+    duration: float = 0.0
+    error: str = ""
+
+
+@dataclass
 class IterationTrace:
     """A record of one cycle — useful for debugging and for the feedback prompt."""
 
@@ -75,6 +97,7 @@ class IterationTrace:
     results: list[TaskResult]
     aggregated: str
     review: ReviewResult
+    verification: list[VerifyResult] = field(default_factory=list)
 
 
 @dataclass

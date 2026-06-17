@@ -8,7 +8,7 @@ files/config per deployment.
 
 from __future__ import annotations
 
-from .types import Subgoal, TaskResult
+from .types import Subgoal, TaskResult, VerifyResult
 
 CRITERIA_SYSTEM = """\
 You turn a user's goal into clear, checkable success criteria — the concrete \
@@ -98,12 +98,21 @@ def subagent_prompt(subgoal: Subgoal, goal: str) -> str:
     return prompt
 
 
-def review_prompt(goal: str, success_criteria: str, aggregated: str) -> str:
-    return (
+def review_prompt(
+    goal: str, success_criteria: str, aggregated: str, verification: str = ""
+) -> str:
+    prompt = (
         f"GOAL:\n{goal}\n\n"
         f"SUCCESS CRITERIA:\n{success_criteria}\n\n"
         f"AGGREGATED OUTPUTS FROM SUBAGENTS:\n{aggregated}"
     )
+    if verification:
+        prompt += (
+            "\n\nVERIFICATION RESULTS FROM REAL COMMANDS:\n"
+            f"{verification}\n\n"
+            "If any required verification failed, goal_complete must be false."
+        )
+    return prompt
 
 
 def aggregate(results: list[TaskResult]) -> str:
@@ -118,7 +127,9 @@ def aggregate(results: list[TaskResult]) -> str:
     return "\n\n".join(lines)
 
 
-def build_feedback(results: list[TaskResult], review) -> str:
+def build_feedback(
+    results: list[TaskResult], review, verification: list[VerifyResult] | None = None
+) -> str:
     """Turn this iteration's problems into the 'refine plan' signal for the next."""
     parts: list[str] = []
     failed = [r for r in results if not r.ok]
@@ -129,6 +140,21 @@ def build_feedback(results: list[TaskResult], review) -> str:
         )
     if review.issues:
         parts.append("Reviewer issues:\n" + "\n".join(f"- {i}" for i in review.issues))
+    failed_verification = [r for r in (verification or []) if not r.ok]
+    if failed_verification:
+        lines = []
+        for r in failed_verification:
+            msg = f"- {r.name}"
+            if r.exit_code is not None:
+                msg += f" exited {r.exit_code}"
+            if r.error:
+                msg += f": {r.error}"
+            elif r.stderr:
+                msg += f": {r.stderr.strip()}"
+            elif r.stdout:
+                msg += f": {r.stdout.strip()}"
+            lines.append(msg)
+        parts.append("Verification failures:\n" + "\n".join(lines))
     if not review.gates_passed:
         gates = []
         if not review.quality_ok:

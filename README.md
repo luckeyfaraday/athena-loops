@@ -84,6 +84,10 @@ Knobs for autonomous coding workers:
   (no cap)**: a real coding worker is slow and unpredictable, so a short per-call
   timeout just kills it mid-task and throws the work away. Bound the *run* instead
   with `Budget(max_seconds=...)`, which is checked between iterations.
+- `verify_commands=[...]` — run real commands after each worker iteration and feed
+  failures back into the next loop. Use this for deterministic checks like
+  `python3 -m pytest`, `npm test`, or `npx playwright test`. Any failing verifier
+  blocks completion even if the reviewer would otherwise accept the work.
 
 For big builds, keep subgoals small (the worker has to finish one in a single
 call) and give the loop room with `max_iterations`; one cold worker can't build
@@ -149,7 +153,7 @@ python3 -m agentloop.mcp_server        # stdio transport
 ```
 
 Tools:
-- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model)`
+- `orchestrate(goal, success_criteria, backend, cwd, max_iterations, skip_permissions, isolate, model, verify_commands, verify_timeout)`
   — runs the loop; returns either the result or `{ status: "needs_input", questions[], token }`
 - `orchestrate_resume(token, answers)` — continues a run that asked for input
 - `list_backends()` — the worker engines this server can drive
@@ -202,14 +206,16 @@ the same contract:
 
 ```bash
 agentloop run --goal "Add a /health endpoint + test" --criteria "test passes" \
-  --backend claude_code --cwd . --skip-permissions --json
+  --backend claude_code --cwd . --skip-permissions --json \
+  --verify "python3 -m pytest" --verify "npx playwright test"
 agentloop backends
 ```
 
 `--json` prints the full result on stdout; `--progress` streams one NDJSON line
-per iteration on stderr; `--goal -` / `--goal-file` read long prompts. Exit code
-is `0` if completed, `1` if a budget guard stopped it, `2` on error — so scripts
-and agents can branch on the outcome.
+per iteration on stderr; `--goal -` / `--goal-file` read long prompts. `--verify`
+is repeatable and runs each command after every iteration in the same repo/worktree
+as the worker. Exit code is `0` if completed, `1` if a budget guard stopped it,
+`2` on error — so scripts and agents can branch on the outcome.
 
 ## How the user gives input (intake & clarification)
 
