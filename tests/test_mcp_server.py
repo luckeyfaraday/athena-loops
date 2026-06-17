@@ -103,6 +103,24 @@ def test_unknown_backend_raises():
         orchestrate_impl("g", "c", backend="nope")
 
 
+def test_orchestrate_impl_reports_cli_intake_failure(monkeypatch):
+    from agentloop.adapters import CliAgent
+
+    bad_agent = CliAgent([sys.executable, "-c", "import sys; sys.exit(7)"])
+    monkeypatch.setattr(
+        "agentloop.mcp_server._build_agent",
+        lambda *args, **kwargs: bad_agent,
+    )
+
+    out = orchestrate_impl("g", "c", backend="claude_code")
+
+    assert out["completed"] is False
+    assert out["iterations"] == 0
+    assert out["stop_reason"] == "intake_agent_error"
+    assert "CLI agent exited 7" in out["error"]
+    assert "stopped in 0 iteration(s)" in out["summary"]
+
+
 def test_isolate_runs_in_worktree_and_reports_it():
     repo = tempfile.mkdtemp(prefix="agentloop-repo-")
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
