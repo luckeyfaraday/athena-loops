@@ -22,6 +22,8 @@ from typing import Optional
 from .interaction import AutoInteraction, ConsoleInteraction
 from .mcp_server import (
     BACKENDS,
+    DEFAULT_BACKEND,
+    _resolve_backend,
     orchestrate_impl,
     orchestrate_resume_impl,
     orchestrate_suspendable,
@@ -126,7 +128,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_backends(args: argparse.Namespace) -> int:
     if args.json:
-        json.dump({"backends": BACKENDS, "default": "claude_code"}, sys.stdout)
+        json.dump({
+            "backends": BACKENDS,
+            "default": DEFAULT_BACKEND,
+            "resolved_default": _resolve_backend(DEFAULT_BACKEND),
+        }, sys.stdout)
         print()
     else:
         print("\n".join(BACKENDS))
@@ -143,8 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--goal-file", help="read goal from a file")
     r.add_argument("--criteria", help="success criteria (use '-' to read stdin)")
     r.add_argument("--criteria-file", help="read success criteria from a file")
-    r.add_argument("--backend", default="claude_code",
-                   help=f"worker backend ({' | '.join(BACKENDS)})")
+    r.add_argument("--backend", default=DEFAULT_BACKEND,
+                   help=f"worker backend (auto | {' | '.join(BACKENDS)})")
     r.add_argument("--cwd", help="repo to work in (coding tasks that edit files)")
     r.add_argument("--max-iterations", type=int, default=4,
                    help="cap on decompose->review cycles (termination guard)")
