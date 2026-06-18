@@ -145,7 +145,8 @@ Presets are starting points — CLI flags vary by version; confirm yours and twe
 
 **Outward — a coding agent *calls* the loop.** An MCP server exposes the loop as a
 tool, so any MCP-aware agent (Claude Code, Cursor, Codex, opencode, Cline, Windsurf)
-can invoke it. The caller need not be the worker — pick `backend` independently.
+can invoke it. By default `backend="auto"` uses the same agent family as the
+caller when detectable; pass `backend` explicitly to override it.
 
 ```bash
 pip install -e ".[mcp]"                # installs the `mcp` SDK
@@ -181,7 +182,7 @@ When `cwd` is given it runs in an isolated worktree (see above) by default.
 There is **no run timeout** — you watch it rather than race it against a clock:
 
 ```
-orchestrate(goal=…, backend="claude_code", cwd="/repo")   # detach=true by default
+orchestrate(goal=…, cwd="/repo")   # backend="auto", detach=true by default
   -> { status: "running", run_id, run_dir, events_path, tail_command }
 orchestrate_status(run_id)        -> { phase, iteration, running, … }   # poll until running=false
 orchestrate_tail(run_id, cursor)  -> { events[], cursor, running, more } # or stream each step
@@ -262,16 +263,17 @@ is unnecessary: `claude mcp add athena-loops -- agentloop-mcp`.
 ```
 
 Then (restart the session first) ask the host agent to "use agentloop to
-orchestrate: <goal>", choosing a `backend` (`claude_code`, `codex`, `mock`, …)
-for the workers. With `backend=claude_code` the workers spawn nested `claude`
-sub-sessions.
+orchestrate: <goal>". The default `backend="auto"` picks the matching worker for
+the caller (`codex` from Codex, `opencode` from OpenCode, `claude_code` from
+Claude Code when detectable). Choose a concrete `backend` (`claude_code`,
+`codex`, `mock`, …) to override that.
 
 For agents that *don't* speak MCP but can run a shell, there's a plain CLI over
 the same contract:
 
 ```bash
 agentloop run --goal "Add a /health endpoint + test" --criteria "test passes" \
-  --backend claude_code --cwd . --skip-permissions --json \
+  --cwd . --skip-permissions --json \
   --verify "python3 -m pytest" --verify "npx playwright test"
 agentloop backends
 ```

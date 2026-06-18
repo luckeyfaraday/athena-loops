@@ -17,6 +17,7 @@ import pytest
 from agentloop.mcp_server import (
     BACKENDS,
     PLAYWRIGHT_VERIFY_COMMAND,
+    _resolve_backend,
     _run_with_progress,
     doctor_impl,
     orchestrate_impl,
@@ -122,6 +123,23 @@ def test_orchestrate_impl_runs_verification_commands():
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="unknown backend"):
         orchestrate_impl("g", "c", backend="nope")
+
+
+def test_auto_backend_uses_caller_agent_hint(monkeypatch):
+    monkeypatch.delenv("OPENCODE", raising=False)
+    monkeypatch.delenv("OPENCODE_RUN_ID", raising=False)
+    assert _resolve_backend("auto", caller_agent="codex") == "codex"
+    assert _resolve_backend("auto", caller_agent="opencode") == "opencode"
+    assert _resolve_backend("auto", caller_agent="claude") == "claude_code"
+
+
+def test_auto_backend_uses_environment_hint(monkeypatch):
+    monkeypatch.setenv("OPENCODE", "1")
+    assert _resolve_backend("auto") == "opencode"
+
+
+def test_explicit_backend_overrides_caller_hint():
+    assert _resolve_backend("codex", caller_agent="opencode") == "codex"
 
 
 def test_orchestrate_impl_reports_cli_loop_failure_after_intake_fallback(monkeypatch):
