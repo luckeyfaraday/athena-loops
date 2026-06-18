@@ -44,6 +44,7 @@ _CLI_PRESETS = {
     "aider": CliAgent.aider,
 }
 BACKENDS = ["mock", "claude_api", *_CLI_PRESETS]
+DEFAULT_BACKEND = "auto"
 RECOMMENDED_MCP_TIMEOUT_MS = 600_000
 
 # The verify command auto-added when a run sets playwright=true. Kept timeout-free
@@ -103,6 +104,52 @@ def _backend_status(name: str) -> dict[str, Any]:
     return status
 
 
+def _caller_backend(caller_agent: Optional[str] = None) -> Optional[str]:
+    """Best-effort mapping from the host agent to the matching worker backend."""
+    hint = (caller_agent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "claude": "claude_code",
+        "claude_code": "claude_code",
+        "codex": "codex",
+        "opencode": "opencode",
+        "open_code": "opencode",
+        "aider": "aider",
+    }
+    if hint in aliases:
+        return aliases[hint]
+
+    env_hints = (
+        ("OPENCODE", "opencode"),
+        ("OPENCODE_RUN_ID", "opencode"),
+        ("CODEX_RUN_ID", "codex"),
+        ("CODEX_SESSION_ID", "codex"),
+        ("CLAUDECODE", "claude_code"),
+        ("CLAUDE_CODE", "claude_code"),
+        ("CLAUDE_SESSION_ID", "claude_code"),
+    )
+    for env_name, backend in env_hints:
+        if os.environ.get(env_name):
+            return backend
+    return None
+
+
+def _resolve_backend(backend: Optional[str] = DEFAULT_BACKEND,
+                     caller_agent: Optional[str] = None) -> str:
+    """Resolve the public backend setting to a concrete backend name.
+
+    `auto` means: use the same agent family as the MCP/CLI caller when we can
+    infer it, then fall back to Claude Code for existing headless behavior.
+    """
+    requested = (backend or DEFAULT_BACKEND).strip().lower()
+    if requested == "auto":
+        return _caller_backend(caller_agent) or "claude_code"
+    aliases = {
+        "claude": "claude_code",
+        "open_code": "opencode",
+    }
+    return aliases.get(requested, requested)
+
+
 def doctor_impl(cwd: Optional[str] = None) -> dict[str, Any]:
     """Return non-invasive diagnostics for MCP hosts and worker backends."""
     cwd_status: dict[str, Any] = {"path": cwd, "provided": cwd is not None}
@@ -160,6 +207,7 @@ def doctor_impl(cwd: Optional[str] = None) -> dict[str, Any]:
 
 def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
                  model: Optional[str], timeout: Optional[float] = None):
+    backend = _resolve_backend(backend)
     if backend == "mock":
         return MockAgent()
     if backend == "claude_api":
@@ -303,7 +351,8 @@ def orchestrate_impl(
     goal: str,
     success_criteria: str = "",
     *,
-    backend: str = "claude_code",
+    backend: str = DEFAULT_BACKEND,
+    caller_agent: Optional[str] = None,
     cwd: Optional[str] = None,
     max_iterations: int = 4,
     max_task_retries: int = 1,
@@ -328,6 +377,7 @@ def orchestrate_impl(
     for terminal prompts, or a SuspendInteraction to make intake raise NeedInput
     when it needs answers (see `orchestrate_suspendable`).
     """
+    backend = _resolve_backend(backend, caller_agent)
     interaction = interaction or AutoInteraction()
     # Build once up front so programmer/input errors like an unknown backend still
     # fail loudly, while runtime CLI/API failures below are returned as JSON.
@@ -376,7 +426,10 @@ def _short(text: str, limit: int = 200) -> str:
 def _loop_kwargs(kw: dict[str, Any]) -> dict[str, Any]:
     """Extract the run_loop knobs from a raw orchestrate kwarg bag (with defaults)."""
     return dict(
-        backend=kw.get("backend", "claude_code"), cwd=kw.get("cwd"),
+        backend=_resolve_backend(
+            kw.get("backend", DEFAULT_BACKEND), kw.get("caller_agent"),
+        ),
+        cwd=kw.get("cwd"),
         max_iterations=kw.get("max_iterations", 4),
         max_task_retries=kw.get("max_task_retries", 1),
         skip_permissions=kw.get("skip_permissions", False),
@@ -391,7 +444,10 @@ def _loop_kwargs(kw: dict[str, Any]) -> dict[str, Any]:
 def _meta(goal: str, criteria: str, kw: dict[str, Any]) -> dict[str, Any]:
     return {
         "goal": goal, "success_criteria": criteria,
-        "backend": kw.get("backend", "claude_code"), "cwd": kw.get("cwd"),
+        "backend": _resolve_backend(
+            kw.get("backend", DEFAULT_BACKEND), kw.get("caller_agent"),
+        ),
+        "cwd": kw.get("cwd"),
         "max_iterations": kw.get("max_iterations", 4),
         "isolate": kw.get("isolate", True),
     }
@@ -400,8 +456,11 @@ def _meta(goal: str, criteria: str, kw: dict[str, Any]) -> dict[str, Any]:
 def _intake(goal: str, success_criteria: str, kw: dict[str, Any],
             interaction: Interaction) -> tuple[str, str, str]:
     """Run intake against a freshly built agent. May raise NeedInput."""
+    backend = _resolve_backend(
+        kw.get("backend", DEFAULT_BACKEND), kw.get("caller_agent"),
+    )
     agent = _build_agent(
-        kw.get("backend", "claude_code"), kw.get("cwd"),
+        backend, kw.get("cwd"),
         kw.get("skip_permissions", False), kw.get("model"), kw.get("timeout"),
     )
     orch = Orchestrator(
@@ -478,9 +537,12 @@ def orchestrate_start_impl(
     with orchestrate_resume(token, answers, detach=true). Unknown backends raise
     loudly here, before anything starts.
     """
-    backend = kw.get("backend", "claude_code")
+    backend = _resolve_backend(
+        kw.get("backend", DEFAULT_BACKEND), kw.get("caller_agent"),
+    )
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
+    kw["backend"] = backend
 
     def thunk(emit: Callable[[str, int, dict], None]) -> dict[str, Any]:
         # Intake runs HERE, on the run's own thread, so the start call returns
@@ -586,7 +648,10 @@ def orchestrate_resume_impl(
         return _launch(goal, criteria, clarifications, kw=data, base_dir=base_dir)
     return _run_loop_impl(
         goal, criteria, clarifications, observer=observer,
-        backend=data.get("backend", "claude_code"), cwd=data.get("cwd"),
+        backend=_resolve_backend(
+            data.get("backend", DEFAULT_BACKEND), data.get("caller_agent"),
+        ),
+        cwd=data.get("cwd"),
         max_iterations=data.get("max_iterations", 4),
         max_task_retries=data.get("max_task_retries", 1),
         skip_permissions=data.get("skip_permissions", False),
@@ -671,7 +736,8 @@ def build_server():
     async def orchestrate(
         goal: str,
         success_criteria: str = "",
-        backend: str = "claude_code",
+        backend: str = DEFAULT_BACKEND,
+        caller_agent: Optional[str] = None,
         cwd: Optional[str] = None,
         max_iterations: int = 4,
         skip_permissions: bool = False,
@@ -715,9 +781,11 @@ def build_server():
             goal: What to achieve.
             success_criteria: How completion is judged. Optional — if omitted the
                 orchestrator proposes criteria itself.
-            backend: Worker engine — "claude_code" | "codex" | "opencode" |
-                "aider" (a coding-agent CLI), "claude_api" (Anthropic SDK), or
-                "mock" (deterministic, for testing).
+            backend: Worker engine — "auto" (default: same agent family as the
+                caller when detectable), "claude_code", "codex", "opencode",
+                "aider", "claude_api", or "mock".
+            caller_agent: Optional caller identity hint for backend="auto", e.g.
+                "codex", "opencode", or "claude". Explicit backend overrides it.
             cwd: Repo to work in. Required for coding tasks that edit files.
             max_iterations: Cap on decompose->review cycles (termination guard).
             skip_permissions: Let CLI workers use tools without prompting. Only
@@ -755,6 +823,7 @@ def build_server():
         if detach:
             return orchestrate_start_impl(
                 goal, success_criteria, backend=backend, cwd=cwd,
+                caller_agent=caller_agent,
                 max_iterations=max_iterations, skip_permissions=skip_permissions,
                 isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
                 verify_commands=verify_commands, verify_timeout=verify_timeout,
@@ -762,6 +831,7 @@ def build_server():
             )
         return await _run_with_progress(_ctx(), lambda observer: orchestrate_suspendable(
             goal, success_criteria, backend=backend, cwd=cwd,
+            caller_agent=caller_agent,
             max_iterations=max_iterations, skip_permissions=skip_permissions,
             isolate=isolate, model=model, timeout=timeout, max_seconds=max_seconds,
             verify_commands=verify_commands, verify_timeout=verify_timeout,
@@ -855,7 +925,8 @@ def build_server():
         """List worker backends this server can drive."""
         return {
             "backends": BACKENDS,
-            "default": "claude_code",
+            "default": DEFAULT_BACKEND,
+            "resolved_default": _resolve_backend(DEFAULT_BACKEND),
             "notes": "CLI backends reuse that tool's own login (incl. subscription "
                      "OAuth); claude_api needs ANTHROPIC_API_KEY; mock is for tests. "
                      "Run doctor() before guessing about backend availability.",
