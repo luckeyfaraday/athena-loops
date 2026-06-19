@@ -5,9 +5,29 @@ from __future__ import annotations
 
 import sys
 
-from agentloop import Budget, CommandVerifier, Orchestrator, VerifyCommand, extract_json
+from agentloop import (
+    Budget,
+    CommandVerifier,
+    Orchestrator,
+    Phase,
+    VerifyCommand,
+    extract_json,
+)
 from agentloop.adapters import MockAgent
 from agentloop.agent import AgentRequest
+
+
+def _phase_path(**orch_kwargs):
+    """Run a loop and return the ordered list of phases it moved through."""
+    moves: list[str] = []
+    orch = Orchestrator(
+        emit=lambda kind, _i, data: (
+            moves.append(data["to"]) if kind == "phase_changed" else None
+        ),
+        **orch_kwargs,
+    )
+    result = orch.run("goal", "criteria")
+    return result, moves
 
 
 def test_happy_path_completes():
@@ -184,6 +204,50 @@ def test_passing_verification_allows_completion():
     result = orch.run("goal", "criteria")
     assert result.completed
     assert result.history[0].verification[0].ok
+
+
+def test_phases_move_through_the_loop_in_order_to_done():
+    result, moves = _phase_path(
+        agent=MockAgent(accept_on_iteration=1), budget=Budget(max_iterations=2),
+    )
+    assert result.completed
+    # One clean pass: plan -> execute -> review -> done. No verifier, so no VERIFY.
+    assert moves == [Phase.DECOMPOSE, Phase.EXECUTE, Phase.REVIEW, Phase.DONE]
+
+
+def test_verify_phase_appears_only_with_a_verifier():
+    verifier = CommandVerifier([
+        VerifyCommand("check", [sys.executable, "-c", "print('ok')"])
+    ])
+    _result, moves = _phase_path(
+        agent=MockAgent(accept_on_iteration=1),
+        budget=Budget(max_iterations=2), verifier=verifier,
+    )
+    assert moves == [
+        Phase.DECOMPOSE, Phase.EXECUTE, Phase.VERIFY, Phase.REVIEW, Phase.DONE,
+    ]
+
+
+def test_looping_back_shows_a_review_to_decompose_transition():
+    # Rejected on pass 1, accepted on pass 2: the loop re-enters DECOMPOSE, which
+    # is the structural signal that the feedback loop fired.
+    _result, moves = _phase_path(
+        agent=MockAgent(accept_on_iteration=2), budget=Budget(max_iterations=5),
+    )
+    assert moves == [
+        Phase.DECOMPOSE, Phase.EXECUTE, Phase.REVIEW,   # pass 1: not accepted
+        Phase.DECOMPOSE, Phase.EXECUTE, Phase.REVIEW,   # pass 2 (re-entry)
+        Phase.DONE,
+    ]
+
+
+def test_exhausted_budget_ends_in_failed_phase():
+    result, moves = _phase_path(
+        agent=MockAgent(accept_on_iteration=999), budget=Budget(max_iterations=2),
+    )
+    assert not result.completed
+    assert moves[-1] == Phase.FAILED
+    assert Phase.DONE not in moves
 
 
 def test_extract_json_recovers_from_prose_and_fences():

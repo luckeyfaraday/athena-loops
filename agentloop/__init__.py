@@ -23,6 +23,7 @@ from .types import (
     LoopEvent,
     LoopResult,
     LoopState,
+    Phase,
     ReviewResult,
     Subgoal,
     TaskResult,
@@ -59,4 +60,5 @@ __all__ = [
     "LoopEvent",
     "LoopResult",
     "LoopState",
+    "Phase",
 ]

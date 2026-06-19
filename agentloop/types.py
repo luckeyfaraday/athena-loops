@@ -17,6 +17,31 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class Phase(str, Enum):
+    """The loop's stages, as first-class state rather than implicit call order.
+
+    The orchestrator already moves through these stages in a fixed order — they
+    were just anonymous (the numbered comments in `run_loop`). Naming them lets a
+    run answer "where am I right now?" and gives later per-phase policy (scoping
+    which tools a stage may use, routing a stage to a cheaper/stronger model)
+    something concrete to switch on. This enum is that shared vocabulary; it does
+    not by itself change what the loop does.
+
+    INTAKE predates the LoopState today (it runs before the loop owns any state),
+    so it is part of the vocabulary but not yet stamped onto a run — wiring it is
+    a follow-up that gives intake its own state object.
+    """
+
+    IDLE = "idle"            # constructed, not yet running
+    INTAKE = "intake"        # clarify criteria / gather answers (pre-loop)
+    DECOMPOSE = "decompose"  # plan: goal -> subgoals
+    EXECUTE = "execute"      # fan out to subagents, aggregate
+    VERIFY = "verify"        # run deterministic verification commands
+    REVIEW = "review"        # quality / consistency / goal-alignment gates
+    DONE = "done"            # terminal: goal met
+    FAILED = "failed"        # terminal: budget exhausted before the goal was met
+
+
 @dataclass
 class Budget:
     """Termination guards. The diagram's NO-branch can loop forever; these stop it."""
@@ -134,6 +159,10 @@ EVENT_RUN_ERROR = "run_error"
 # Intake paused for clarification; the run stops with questions + a resume token
 # in its result instead of blocking the start call to ask.
 EVENT_NEEDS_INPUT = "needs_input"
+# The loop moved from one Phase to another. Carries {"from": <phase>, "to":
+# <phase>}; the run-level status uses "to" as the run's current phase, so the
+# lens reports which stage the run is actually in rather than the last event.
+EVENT_PHASE_CHANGED = "phase_changed"
 
 
 @dataclass
@@ -168,6 +197,7 @@ class LoopState:
     goal: str
     success_criteria: str
     budget: Budget
+    phase: Phase = Phase.IDLE   # which stage the loop is in right now
     iteration: int = 0
     agent_calls: int = 0
     feedback: str = ""           # the "Update context, refine plan" signal
