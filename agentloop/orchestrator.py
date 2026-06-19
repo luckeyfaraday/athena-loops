@@ -31,12 +31,14 @@ from .types import (
     EVENT_DECOMPOSED,
     EVENT_ITERATION_FINISHED,
     EVENT_ITERATION_STARTED,
+    EVENT_PHASE_CHANGED,
     EVENT_REVIEW,
     EVENT_VERIFICATION,
     Budget,
     IterationTrace,
     LoopResult,
     LoopState,
+    Phase,
     ReviewResult,
     Subgoal,
 )
@@ -102,6 +104,22 @@ class Orchestrator:
             self._emit_cb(kind, iteration, data)
         except Exception:  # noqa: BLE001 — observability must never crash the loop
             pass
+
+    def _transition(self, state: LoopState, phase: Phase) -> None:
+        """Move the loop into a new phase and announce the move.
+
+        The stages were previously implicit in the order of calls below; this
+        records *which* stage the run is in as first-class state, and emits one
+        phase_changed event per move so the lens can show the current stage (and
+        the review->decompose move that means the loop is iterating again). No
+        control-flow change — purely making the existing structure legible.
+        """
+        prev = state.phase
+        if prev is phase:
+            return
+        state.phase = phase
+        self._emit(EVENT_PHASE_CHANGED, state.iteration,
+                   {"from": prev.value, "to": phase.value})
 
     # --- intake -------------------------------------------------------------
 
@@ -173,6 +191,7 @@ class Orchestrator:
         while True:
             stop = state.budget_exhausted()
             if stop:
+                self._transition(state, Phase.FAILED)
                 return self._finish(state, completed=False, stop_reason=stop)
 
             state.iteration += 1
@@ -184,6 +203,7 @@ class Orchestrator:
             emit(EVENT_ITERATION_STARTED, {"max_iterations": self.budget.max_iterations})
 
             # 1. Task decomposition (feedback refines it on later passes).
+            self._transition(state, Phase.DECOMPOSE)
             subgoals = self._decompose(state, count_call)
             emit(EVENT_DECOMPOSED, {
                 "subgoals": [{"id": sg.id, "description": sg.description} for sg in subgoals]
@@ -191,6 +211,7 @@ class Orchestrator:
 
             # 2 & 3. Fan out to subagents, execute, capture failures. The sink
             # streams each worker's start/finish (and its output) as it happens.
+            self._transition(state, Phase.EXECUTE)
             results = execute(
                 self.agent,
                 subgoals,
@@ -207,6 +228,8 @@ class Orchestrator:
             emit(EVENT_AGGREGATED, {"preview": _preview(aggregated), "chars": len(aggregated)})
 
             # 5. Run deterministic verification commands, if configured.
+            if self.verifier:
+                self._transition(state, Phase.VERIFY)
             verification = self.verifier.run() if self.verifier else []
             verification_text = summarize_verification(verification)
             if verification:
@@ -218,6 +241,7 @@ class Orchestrator:
                 })
 
             # 6. Reviewer agent — quality / consistency / goal-alignment gates.
+            self._transition(state, Phase.REVIEW)
             review = self._review(state, aggregated, verification_text, count_call)
             emit(EVENT_REVIEW, {
                 "gates_passed": review.gates_passed,
@@ -253,6 +277,7 @@ class Orchestrator:
             all_ok = all(r.ok for r in results)
             verification_ok = all(r.ok for r in verification)
             if review.gates_passed and review.goal_complete and all_ok and verification_ok:
+                self._transition(state, Phase.DONE)
                 return self._finish(state, completed=True, stop_reason="goal_complete",
                                     final=aggregated)
 

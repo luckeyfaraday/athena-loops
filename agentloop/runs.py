@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .types import (
+    EVENT_PHASE_CHANGED,
     EVENT_RUN_ERROR,
     EVENT_RUN_FINISHED,
     EVENT_RUN_STARTED,
@@ -146,7 +147,10 @@ class RunWriter:
             self.events.append(event)
             if iteration:
                 self.iteration = iteration
-            self.phase = kind
+            # A phase_changed event names the loop's actual stage in data["to"];
+            # use that so status reports the real phase. Every other event just
+            # marks the run by its most recent moment (the event kind).
+            self.phase = data.get("to", kind) if kind == EVENT_PHASE_CHANGED else kind
             with open(self.events_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event.to_json(), ensure_ascii=False) + "\n")
             # Reentrant lock: status() re-acquires it safely on this same thread.
