@@ -29,10 +29,30 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 
-def _git(repo: str, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True
-    )
+# A stuck git call must surface as an error, never an indefinite hang. The cap is
+# generous because `worktree add` checks out a full tree (large repos, slow disks,
+# AV scanning), but finite so a prompting/wedged git can't freeze the run forever.
+_GIT_TIMEOUT = 300.0
+
+
+def _git(repo: str, *args: str, timeout: float = _GIT_TIMEOUT) -> str:
+    # stdin=DEVNULL: when the MCP server runs git, the child would otherwise inherit
+    # the server's JSON-RPC stdin pipe. A checkout filter that prompts (Git LFS
+    # smudge, a credential helper) then blocks reading a pipe that never answers and
+    # hangs the whole run silently. DEVNULL + GIT_TERMINAL_PROMPT=0 make any such
+    # prompt fail fast with a clear error instead.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            env=env, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"git {' '.join(args)} timed out after {timeout}s "
+            f"(possibly blocked on a credential/LFS prompt)"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()

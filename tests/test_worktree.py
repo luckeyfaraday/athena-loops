@@ -108,3 +108,43 @@ def test_non_git_dir_raises():
     with pytest.raises(RuntimeError, match="not a git repository"):
         with worktree(d):
             pass
+
+
+def test_git_calls_never_inherit_stdin_and_disable_prompts(monkeypatch):
+    # Regression for the silent decompose-phase hang: under the MCP server, a git
+    # checkout filter that prompts (LFS smudge, credential helper) would inherit
+    # the JSON-RPC stdin and block forever. Every git call must close stdin and
+    # disable terminal prompts so such a prompt fails fast instead of hanging.
+    from importlib import import_module
+    wt_mod = import_module("agentloop.worktree")
+
+    seen: list[dict] = []
+    real_run = subprocess.run
+
+    def spy(argv, **kw):
+        if argv[:1] == ["git"]:
+            seen.append(kw)
+        return real_run(argv, **kw)
+
+    repo = _make_repo()  # build before patching so only worktree's git calls are spied
+    monkeypatch.setattr(wt_mod.subprocess, "run", spy)
+    with worktree(repo, cleanup="always"):
+        pass
+
+    assert seen, "expected git to be invoked"
+    for kw in seen:
+        assert kw.get("stdin") is subprocess.DEVNULL
+        assert kw["env"].get("GIT_TERMINAL_PROMPT") == "0"
+        assert kw.get("timeout") is not None
+
+
+def test_git_timeout_surfaces_clear_error(monkeypatch):
+    from importlib import import_module
+    wt_mod = import_module("agentloop.worktree")
+
+    def boom(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="timed out"):
+        wt_mod._git(".", "rev-parse", "HEAD")

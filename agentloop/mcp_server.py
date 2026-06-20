@@ -29,6 +29,7 @@ from .types import (
     EVENT_INTAKE_FINISHED,
     EVENT_INTAKE_STARTED,
     EVENT_NEEDS_INPUT,
+    EVENT_WORKTREE_READY,
     Budget,
     LoopResult,
     LoopState,
@@ -343,6 +344,8 @@ def _run_loop_impl(
     # the caller's checkout. The worktree (and its branch) is kept iff it changed.
     if cwd and isolate:
         with worktree(cwd, cleanup="auto") as wt:
+            if emit:
+                emit(EVENT_WORKTREE_READY, 0, {"path": wt.path, "branch": wt.branch})
             return run_in(wt.path, wt)
     return run_in(cwd, None)
 
