@@ -145,6 +145,11 @@ class LoopResult:
 EVENT_RUN_STARTED = "run_started"
 EVENT_INTAKE_STARTED = "intake_started"
 EVENT_INTAKE_FINISHED = "intake_finished"
+# Between intake and the first iteration the launcher may build an isolated git
+# worktree (a checkout that can be slow or, if a filter prompts, blocking). This
+# event makes that otherwise-invisible gap observable so a stall there is
+# attributable rather than looking like a frozen intake.
+EVENT_WORKTREE_READY = "worktree_ready"
 EVENT_ITERATION_STARTED = "iteration_started"
 EVENT_DECOMPOSED = "decomposed"
 EVENT_SUBAGENT_STARTED = "subagent_started"
