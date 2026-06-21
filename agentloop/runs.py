@@ -18,7 +18,9 @@ Layout per run (under ``<base>/<run_id>/``, where base defaults to
 
 The manager keeps an in-process registry so the poll tools can resolve a
 ``run_id`` to its writer; the files are the durable, cross-process record a human
-can watch from any terminal.
+can watch from any terminal. When the registry misses (a fresh process after the
+MCP host reconnects), the poll tools fall back to a user-global run index that
+maps ``run_id`` -> run dir and rehydrate status/tail/result straight off disk.
 """
 
 from __future__ import annotations
@@ -72,6 +74,136 @@ def _write_json(path: str, obj: Any) -> None:
 def _preview(text: str, limit: int = _PREVIEW_LIMIT) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit] + f"… (+{len(text) - limit} chars)"
+
+
+# --- cross-process run index + on-disk rehydration ---------------------------
+# The in-memory registry vanishes when the server process restarts (e.g. the MCP
+# host reconnects mid-run), but the run dirs persist. To resolve a run_id back to
+# its dir without the caller passing a cwd, every started run appends one line to
+# a stable, user-global index; read views fall back to reading the run dir off
+# disk when the registry misses. See `RunManager` for how the fallback is wired.
+
+_index_lock = threading.Lock()
+
+
+def _index_path() -> str:
+    # AGENTLOOP_INDEX overrides the location (tests, or pinning it to a shared
+    # spot when runs span several working dirs); defaults under the user home so
+    # one index spans every cwd a run was started from.
+    override = os.environ.get("AGENTLOOP_INDEX")
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), RUNS_DIRNAME, "index.jsonl")
+
+
+def _index_record(run_id: str, run_dir: str) -> None:
+    path = _index_path()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    line = json.dumps({"run_id": run_id, "run_dir": run_dir}, ensure_ascii=False) + "\n"
+    with _index_lock:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+def _index_entries() -> list[tuple[str, str]]:
+    """All indexed (run_id, run_dir) pairs, newest write wins on duplicates."""
+    path = _index_path()
+    if not os.path.exists(path):
+        return []
+    latest: dict[str, str] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # tolerate a torn final line from a concurrent append
+            rid, rdir = rec.get("run_id"), rec.get("run_dir")
+            if rid and rdir:
+                latest[rid] = rdir
+    return list(latest.items())
+
+
+def _index_lookup(run_id: str) -> Optional[str]:
+    for rid, rdir in _index_entries():
+        if rid == run_id:
+            return rdir
+    return None
+
+
+def _load_json(path: str) -> Optional[dict[str, Any]]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _disk_status(run_dir: str, run_id: str) -> Optional[dict[str, Any]]:
+    """Reconstruct a status dict from a run dir, for a run no longer in memory.
+
+    A rehydrated run has no live thread in this process (handles are never
+    evicted, so a registry miss means a different/previous process owned it).
+    Thus a recorded `running: true` with no result.json was cut off by the
+    restart and can never resume — report it as a terminal `interrupted` rather
+    than a live run, so callers stop polling and `result(wait=...)` won't try to
+    join a thread that no longer exists.
+    """
+    status = _load_json(os.path.join(run_dir, "status.json"))
+    if status is None:
+        return None
+    status["rehydrated"] = True
+    result = _load_json(os.path.join(run_dir, "result.json"))
+    if result is not None:
+        status["running"] = False
+        status["completed"] = result.get("completed")
+        status["stop_reason"] = result.get("stop_reason")
+    elif status.get("running"):
+        status["running"] = False
+        status["stop_reason"] = "interrupted"
+    return status
+
+
+def _disk_tail(run_dir: str, run_id: str, cursor: int, limit: int) -> Optional[dict[str, Any]]:
+    path = os.path.join(run_dir, "events.jsonl")
+    if not os.path.exists(path):
+        return None
+    newer: list[dict[str, Any]] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("seq", 0) > cursor:
+                newer.append(ev)
+    page = newer[:limit]
+    status = _disk_status(run_dir, run_id) or {}
+    return {
+        "run_id": run_id,
+        "events": page,
+        "cursor": page[-1]["seq"] if page else cursor,
+        "running": bool(status.get("running")),
+        "more": len(newer) > len(page),
+        "rehydrated": True,
+    }
+
+
+def _disk_result(run_dir: str, run_id: str) -> Optional[dict[str, Any]]:
+    result = _load_json(os.path.join(run_dir, "result.json"))
+    if result is not None:
+        return result
+    # No result.json: the run never finished. _disk_status turns an orphaned
+    # `running` into a terminal `interrupted`; surface that (we can't fabricate
+    # the full history/final_output the run would have produced).
+    return _disk_status(run_dir, run_id)
 
 
 class RunWriter:
@@ -223,6 +355,9 @@ class RunManager:
         run_dir = os.path.join(base, run_id)
         os.makedirs(run_dir, exist_ok=True)
         writer = RunWriter(run_id, run_dir)
+        # Record the dir before any work so a poll after an immediate reconnect
+        # can still resolve this run_id off disk.
+        _index_record(run_id, run_dir)
         writer.begin(meta)
 
         def target() -> None:
@@ -242,24 +377,37 @@ class RunManager:
         with self._lock:
             return self._runs.get(run_id)
 
+    def _rehydrate_dir(self, run_id: str) -> Optional[str]:
+        """Locate a run dir for a run_id this process never started, off the index."""
+        run_dir = _index_lookup(run_id)
+        return run_dir if run_dir and os.path.isdir(run_dir) else None
+
     def status(self, run_id: str) -> dict[str, Any]:
         handle = self._get(run_id)
-        if handle is None:
-            return _unknown(run_id)
-        return handle.writer.status()
+        if handle is not None:
+            return handle.writer.status()
+        run_dir = self._rehydrate_dir(run_id)
+        disk = _disk_status(run_dir, run_id) if run_dir else None
+        return disk if disk is not None else _unknown(run_id)
 
     def tail(self, run_id: str, cursor: int = 0, limit: int = _TAIL_LIMIT) -> dict[str, Any]:
         handle = self._get(run_id)
-        if handle is None:
-            return _unknown(run_id)
-        return handle.writer.tail(cursor, limit)
+        if handle is not None:
+            return handle.writer.tail(cursor, limit)
+        run_dir = self._rehydrate_dir(run_id)
+        disk = _disk_tail(run_dir, run_id, cursor, limit) if run_dir else None
+        return disk if disk is not None else _unknown(run_id)
 
     def result(
         self, run_id: str, wait: bool = False, timeout: Optional[float] = None
     ) -> dict[str, Any]:
         handle = self._get(run_id)
         if handle is None:
-            return _unknown(run_id)
+            # No live thread to join; serve the last persisted outcome (or the
+            # interrupted state) straight from disk.
+            run_dir = self._rehydrate_dir(run_id)
+            disk = _disk_result(run_dir, run_id) if run_dir else None
+            return disk if disk is not None else _unknown(run_id)
         if wait and handle.thread.is_alive():
             handle.thread.join(timeout)
         if handle.writer.result is not None:
@@ -271,13 +419,24 @@ class RunManager:
     def list_runs(self) -> dict[str, Any]:
         with self._lock:
             handles = list(self._runs.values())
-        return {"runs": [h.writer.status() for h in handles]}
+        runs = [h.writer.status() for h in handles]
+        seen = {h.run_id for h in handles}
+        # Fold in runs from previous processes that the registry no longer holds.
+        for run_id, run_dir in _index_entries():
+            if run_id in seen or not os.path.isdir(run_dir):
+                continue
+            disk = _disk_status(run_dir, run_id)
+            if disk is not None:
+                runs.append(disk)
+                seen.add(run_id)
+        return {"runs": runs}
 
 
 def _unknown(run_id: str) -> dict[str, Any]:
     return {"error": f"unknown run_id {run_id!r}", "run_id": run_id}
 
 
-# One registry per server process. Detached runs live here until the process exits;
-# the events.jsonl / result.json files are the durable record that outlives it.
+# One registry per server process. Detached runs live here while the process runs;
+# the run index + each run's events.jsonl / result.json are the durable record that
+# outlives it, so the poll tools rehydrate a run_id from disk after a restart.
 MANAGER = RunManager()
