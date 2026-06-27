@@ -1,4 +1,4 @@
-# agentloop — backend-agnostic AI agent orchestration loop for Python
+# Athena Loops — backend-agnostic AI agent orchestration loop for Python
 
 **agentloop** is a lightweight Python framework for multi-agent orchestration. It
 implements the **orchestrator → worker → reviewer pattern** (the AI agent
