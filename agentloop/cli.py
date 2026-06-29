@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="let CLI workers use tools without prompting (needs --cwd)")
     r.add_argument("--no-isolate", action="store_true",
                    help="do NOT run in a throwaway worktree when --cwd is set")
-    r.add_argument("--model", help="model override for claude_code / claude_api")
+    r.add_argument("--model", help="model override for claude_code / copilot / claude_api")
     r.add_argument("--json", action="store_true", help="emit full result as JSON")
     r.add_argument("--progress", action="store_true",
                    help="stream per-iteration NDJSON to stderr")

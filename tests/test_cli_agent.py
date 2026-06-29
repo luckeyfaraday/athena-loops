@@ -134,6 +134,15 @@ def test_skip_permissions_adds_bypass_flag():
     assert "--print-logs" in CliAgent.opencode().command
     assert "--dangerously-skip-permissions" not in CliAgent.opencode().command
     assert "--yes-always" in CliAgent.aider(skip_permissions=True).command
+    assert "--allow-all-tools" in CliAgent.copilot(skip_permissions=True).command
+    assert "--allow-all-tools" not in CliAgent.copilot().command
+
+
+def test_copilot_preset_shape():
+    cmd = CliAgent.copilot(model="gpt-5.4").command
+    assert cmd[:2] == ["copilot", "-p"]
+    assert "-s" in cmd and "--no-ask-user" in cmd
+    assert cmd[-2:] == ["--model", "gpt-5.4"]
 
 
 def test_build_agent_passes_skip_permissions_to_opencode():

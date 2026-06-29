@@ -28,6 +28,7 @@ BUILDERS = {
     "codex": CliAgent.codex,
     "opencode": CliAgent.opencode,
     "aider": CliAgent.aider,
+    "copilot": CliAgent.copilot,
 }
 
 GOAL = "Add a /health endpoint that returns {status: ok} and a test for it."
