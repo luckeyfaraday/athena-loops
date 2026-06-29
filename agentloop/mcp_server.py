@@ -43,6 +43,7 @@ _CLI_PRESETS = {
     "codex": CliAgent.codex,
     "opencode": CliAgent.opencode,
     "aider": CliAgent.aider,
+    "copilot": CliAgent.copilot,
 }
 BACKENDS = ["mock", "claude_api", *_CLI_PRESETS]
 DEFAULT_BACKEND = "auto"
@@ -87,6 +88,7 @@ def _backend_status(name: str) -> dict[str, Any]:
         "codex": "codex",
         "opencode": "opencode",
         "aider": "aider",
+        "copilot": "copilot",
     }[name]
     path = shutil.which(executable)
     status: dict[str, Any] = {
@@ -115,6 +117,7 @@ def _caller_backend(caller_agent: Optional[str] = None) -> Optional[str]:
         "opencode": "opencode",
         "open_code": "opencode",
         "aider": "aider",
+        "copilot": "copilot",
     }
     if hint in aliases:
         return aliases[hint]
@@ -127,6 +130,8 @@ def _caller_backend(caller_agent: Optional[str] = None) -> Optional[str]:
         ("CLAUDECODE", "claude_code"),
         ("CLAUDE_CODE", "claude_code"),
         ("CLAUDE_SESSION_ID", "claude_code"),
+        ("COPILOT_CLI", "copilot"),
+        ("COPILOT_AGENT_SESSION_ID", "copilot"),
     )
     for env_name, backend in env_hints:
         if os.environ.get(env_name):
@@ -219,7 +224,7 @@ def _build_agent(backend: str, cwd: Optional[str], skip_permissions: bool,
         if cwd:
             kw["cwd"] = cwd
         kw["skip_permissions"] = skip_permissions
-        if backend == "claude_code" and model:
+        if backend in ("claude_code", "copilot") and model:
             kw["model"] = model
         return _CLI_PRESETS[backend](**kw)
     raise ValueError(f"unknown backend {backend!r}; choose from {BACKENDS}")
@@ -786,9 +791,9 @@ def build_server():
                 orchestrator proposes criteria itself.
             backend: Worker engine — "auto" (default: same agent family as the
                 caller when detectable), "claude_code", "codex", "opencode",
-                "aider", "claude_api", or "mock".
+                "aider", "copilot", "claude_api", or "mock".
             caller_agent: Optional caller identity hint for backend="auto", e.g.
-                "codex", "opencode", or "claude". Explicit backend overrides it.
+                "codex", "opencode", "copilot", or "claude". Explicit backend overrides it.
             cwd: Repo to work in. Required for coding tasks that edit files.
             max_iterations: Cap on decompose->review cycles (termination guard).
             skip_permissions: Let CLI workers use tools without prompting. Only

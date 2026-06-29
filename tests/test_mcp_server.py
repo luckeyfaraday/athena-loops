@@ -131,6 +131,7 @@ def test_auto_backend_uses_caller_agent_hint(monkeypatch):
     assert _resolve_backend("auto", caller_agent="codex") == "codex"
     assert _resolve_backend("auto", caller_agent="opencode") == "opencode"
     assert _resolve_backend("auto", caller_agent="claude") == "claude_code"
+    assert _resolve_backend("auto", caller_agent="copilot") == "copilot"
 
 
 def test_auto_backend_uses_environment_hint(monkeypatch):
@@ -198,7 +199,14 @@ def test_isolate_runs_in_worktree_and_reports_it():
 
 
 def test_backends_listed():
-    assert "mock" in BACKENDS and "claude_code" in BACKENDS
+    assert "mock" in BACKENDS and "claude_code" in BACKENDS and "copilot" in BACKENDS
+
+
+def test_build_agent_forwards_model_to_copilot():
+    from agentloop.mcp_server import _build_agent
+    agent = _build_agent("copilot", cwd=None, skip_permissions=True,
+                         model="gpt-5.4", timeout=None)
+    assert "--model" in agent.command and "gpt-5.4" in agent.command
 
 
 def test_doctor_reports_backends_and_timeout_guidance(tmp_path):
