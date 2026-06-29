@@ -1,5 +1,7 @@
 # Athena Loops — backend-agnostic AI agent orchestration loop for Python
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **agentloop** is a lightweight Python framework for multi-agent orchestration. It
 implements the **orchestrator → worker → reviewer pattern** (the AI agent
 orchestration loop) as a deterministic harness with a closed feedback loop: a goal
@@ -414,3 +416,7 @@ same family of idea popularized by Peter Steinberger's writing on running coding
 agents in a loop ("Peter Steinberger Loops"). agentloop turns that pattern into a
 reusable, backend-agnostic harness with an explicit review gate and budget guards,
 rather than a one-off shell script.
+
+## License
+
+Athena Loops is released under the [MIT License](LICENSE).

@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "Backend-agnostic implementation of the AI Agent Orchestration Loop (orchestrator-worker-reviewer)."
 requires-python = ">=3.10"
 dependencies = []  # core harness has zero runtime deps
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
 
 [project.optional-dependencies]
 claude = ["anthropic>=0.40"]
